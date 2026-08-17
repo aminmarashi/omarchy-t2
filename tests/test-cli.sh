@@ -98,6 +98,18 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'kb_variant = "mac-iso"
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = false'
 assert_exists "$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
 assert_exists "$home/.config/systemd/user/bt-agent.service.d/omarchy-t2.conf"
+mic_config="$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
+assert_file_contains "$mic_config" 'target.object        = "alsa_input.pci-0000_04_00.3.HiFi__Mic__source"'
+assert_file_contains "$mic_config" 'priority.session    = 1800'
+assert_file_contains "$mic_config" 'state.default-volume = 1.0'
+assert_file_contains "$cli" 'wpctl clear-default 1'
+assert_file_contains "$cli" 'pactl set-source-volume effect_output.filter-chain-t2-mic 100%'
+if grep -Fq 'node.target' "$mic_config"; then
+  fail "microphone filter uses the ignored node.target property"
+fi
+if grep -Fq 'pactl set-default-source' "$cli"; then
+  fail "CLI pins a microphone instead of allowing automatic routing"
+fi
 
 "$cli" battery limit 80
 "$cli" fan profile quiet
