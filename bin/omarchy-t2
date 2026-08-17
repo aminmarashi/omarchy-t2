@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-VERSION=0.1.0
+VERSION=0.2.0
 SUPPORTED_MODEL=MacBookPro16,1
 
 ROOT=${OMARCHY_T2_ROOT:-}
@@ -16,6 +16,15 @@ USER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-t2"
 DMI_PATH=${OMARCHY_T2_DMI_PATH:-$ROOT/sys/devices/virtual/dmi/id/product_name}
 SKIP_RUNTIME=${OMARCHY_T2_SKIP_RUNTIME:-false}
 DRY_RUN=false
+TTS_DATA_DIR=${OMARCHY_T2_TTS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-t2/tts}
+TTS_MODEL_DIR="$TTS_DATA_DIR/models"
+TTS_ENGINE=${OMARCHY_T2_TTS_ENGINE:-$LIB_DIR/qwen-tts}
+TTS_TALKER=qwen-talker-1.7b-customvoice-Q8_0.gguf
+TTS_CODEC=qwen-tokenizer-12hz-Q8_0.gguf
+TTS_TALKER_URL=${OMARCHY_T2_TTS_TALKER_URL:-https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main/$TTS_TALKER}
+TTS_CODEC_URL=${OMARCHY_T2_TTS_CODEC_URL:-https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main/$TTS_CODEC}
+TTS_TALKER_SHA256=${OMARCHY_T2_TTS_TALKER_SHA256:-cab2cff67a0a557310febe558dc83076b28ed790e491867eb2751759f4cd89fa}
+TTS_CODEC_SHA256=${OMARCHY_T2_TTS_CODEC_SHA256:-1883beeed99348fc35e23dd225e9082f93f6f8c109330a33d935baa8acdbfd94}
 
 usage() {
   cat <<'EOF'
@@ -31,6 +40,7 @@ Usage:
   omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]
   omarchy-t2 bluetooth [status | enable | disable]
   omarchy-t2 gpu [status | integrated | dedicated]
+  omarchy-t2 tts [status | setup [--yes] [--dry-run] | enable | disable | remove [--yes]]
   omarchy-t2 restore [--yes]
   omarchy-t2 version
 
@@ -235,6 +245,7 @@ load_input_config() {
   KEYBOARD_LAYOUT=us
   KEYBOARD_VARIANT=mac-iso
   TAP_TO_CLICK=false
+  TTS_ENABLED=false
   if [[ -r $USER_CONFIG ]]; then
     # shellcheck source=/dev/null
     source "$USER_CONFIG"
@@ -303,6 +314,13 @@ hl.config({
     },
   },
 })
+
+if $TTS_ENABLED then
+  hl.unbind("SUPER + R")
+  hl.unbind("SUPER + E")
+  o.bind("SUPER + R", "Read selected text from beginning", "omarchy-tts read")
+  o.bind("SUPER + E", "Pause or resume selected text", "omarchy-tts toggle-pause")
+end
 EOF
   if [[ ! -f $target ]] || ! grep -Fq -- '-- Managed by omarchy-t2.' "$target"; then
     backup_user_file "$target"
@@ -362,6 +380,108 @@ input_tap() {
   esac
   input_apply
   note "Tap-to-click: $value"
+}
+
+tts_models_ready() {
+  [[ -f $TTS_MODEL_DIR/$TTS_TALKER && -f $TTS_MODEL_DIR/$TTS_CODEC ]]
+}
+
+tts_require_runtime() {
+  local command
+  [[ -x $TTS_ENGINE ]] || die "packaged TTS engine is missing: $TTS_ENGINE"
+  for command in curl ffmpeg flock notify-send pw-play sha256sum wl-paste; do
+    command -v "$command" >/dev/null 2>&1 || die "TTS dependency is missing: $command"
+  done
+}
+
+tts_download_model() {
+  local name=$1
+  local url=$2
+  local expected_sha256=$3
+  local destination="$TTS_MODEL_DIR/$name"
+  local partial="$destination.part"
+
+  if [[ -f $destination ]] && printf '%s  %s\n' "$expected_sha256" "$destination" | sha256sum --check --status; then
+    note "TTS model already verified: $name"
+    return 0
+  fi
+
+  note "Downloading $name"
+  curl --fail --location --retry 3 --continue-at - --output "$partial" "$url"
+  if ! printf '%s  %s\n' "$expected_sha256" "$partial" | sha256sum --check --status; then
+    rm -f "$partial"
+    die "downloaded model failed checksum verification: $name"
+  fi
+  mv -f "$partial" "$destination"
+}
+
+tts_set_enabled() {
+  local enabled=$1
+  if [[ ! -r $USER_CONFIG ]]; then
+    install -Dm0644 "$SHARE_DIR/defaults/input.conf" "$USER_CONFIG"
+  fi
+  write_setting "$USER_CONFIG" TTS_ENABLED "$enabled" user
+  input_apply
+}
+
+tts_setup() {
+  local assume_yes=false
+
+  while (($#)); do
+    case $1 in
+    --yes|-y) assume_yes=true ;;
+    --dry-run) DRY_RUN=true ;;
+    *) die "unknown TTS setup option: $1" ;;
+    esac
+    shift
+  done
+
+  tts_require_runtime
+  cat <<EOF
+Omarchy T2 will download and verify about 2.2 GB of Qwen3-TTS Q8 models,
+enable Vulkan synthesis with the Vivian voice, and bind:
+  • SUPER + R  read the primary selection
+  • SUPER + E  pause or resume speech
+
+Models are stored under:
+  $TTS_MODEL_DIR
+EOF
+  confirm "Set up GPU text-to-speech?" "$assume_yes" || exit 0
+  if [[ $DRY_RUN == true ]]; then
+    note "Dry run complete. No changes made."
+    return 0
+  fi
+
+  install -d -m0755 "$TTS_MODEL_DIR"
+  tts_download_model "$TTS_TALKER" "$TTS_TALKER_URL" "$TTS_TALKER_SHA256"
+  tts_download_model "$TTS_CODEC" "$TTS_CODEC_URL" "$TTS_CODEC_SHA256"
+  tts_set_enabled true
+  note "GPU text-to-speech is ready. Select text and press SUPER + R."
+}
+
+tts_enable() {
+  tts_require_runtime
+  tts_models_ready || die "TTS models are missing; run 'omarchy-t2 tts setup'"
+  tts_set_enabled true
+  note "GPU text-to-speech enabled."
+}
+
+tts_disable() {
+  local launcher="$ROOT/usr/bin/omarchy-tts"
+  [[ -x $launcher ]] && "$launcher" stop >/dev/null 2>&1 || true
+  tts_set_enabled false
+  note "GPU text-to-speech disabled."
+}
+
+tts_remove() {
+  local assume_yes=${1:-false}
+  confirm "Disable TTS and remove its downloaded models?" "$assume_yes" || exit 0
+  tts_disable
+  case $TTS_DATA_DIR in
+  "$HOME"/*) rm -rf -- "$TTS_DATA_DIR" ;;
+  *) die "refusing to remove TTS data outside the home directory: $TTS_DATA_DIR" ;;
+  esac
+  note "Removed downloaded TTS models."
 }
 
 audio_speakers_enable() {
@@ -564,6 +684,7 @@ Fan profile:    $FAN_PROFILE
 GPU mode:       $GPU_MODE
 Keyboard:       $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+/$KEYBOARD_VARIANT}
 Tap-to-click:   $TAP_TO_CLICK
+Text-to-speech: $([[ $TTS_ENABLED == true ]] && echo enabled || echo disabled) (models: $(tts_models_ready && echo ready || echo missing))
 Speaker DSP:    $([[ -e $ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf ]] && echo enabled || echo disabled)
 Microphone DSP: $([[ -e ${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf ]] && echo enabled || echo disabled)
 EOF
@@ -582,6 +703,7 @@ doctor_check() {
 
 cmd_doctor() {
   local failures=0
+  load_input_config
   doctor_check "Supported model" test "$(model_name)" = "$SUPPORTED_MODEL" || failures=$((failures + 1))
   doctor_check "T2 kernel" grep -qi t2 /proc/sys/kernel/osrelease || failures=$((failures + 1))
   doctor_check "Touchpad rule" test -e "$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules" || failures=$((failures + 1))
@@ -591,6 +713,11 @@ cmd_doctor() {
   doctor_check "Microphone DSP config" test -e "${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" || failures=$((failures + 1))
   doctor_check "Speaker DSP node" pactl get-sink-info effect_input.filter-chain-speakers || failures=$((failures + 1))
   doctor_check "Microphone DSP node" pactl get-source-info effect_output.filter-chain-t2-mic || failures=$((failures + 1))
+  if [[ $TTS_ENABLED == true ]]; then
+    doctor_check "TTS engine" test -x "$TTS_ENGINE" || failures=$((failures + 1))
+    doctor_check "TTS models" tts_models_ready || failures=$((failures + 1))
+    doctor_check "Radeon Vulkan driver" test -r "$ROOT/usr/share/vulkan/icd.d/radeon_icd.json" || failures=$((failures + 1))
+  fi
   ((failures == 0)) || return 1
 }
 
@@ -610,11 +737,13 @@ remove_input_include() {
 
 cmd_restore() {
   local assume_yes=false
+  local tts_launcher="$ROOT/usr/bin/omarchy-tts"
   [[ ${1:-} == --yes || ${1:-} == -y ]] && assume_yes=true
   require_supported_model
-  confirm "Restore files replaced by omarchy-t2?" "$assume_yes" || exit 0
+  confirm "Restore replaced files and remove downloaded TTS models?" "$assume_yes" || exit 0
 
   user_systemctl disable --now omarchy-t2-mic-guard.service >/dev/null 2>&1 || true
+  [[ -x $tts_launcher ]] && "$tts_launcher" stop >/dev/null 2>&1 || true
   if runtime; then
     sudo systemctl disable --now omarchy-t2-battery-limit.service >/dev/null 2>&1 || true
   fi
@@ -630,6 +759,12 @@ cmd_restore() {
   restore_system_file "$ROOT/etc/modprobe.d/apple-gmux.conf"
   restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
   restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/omarchy-t2.lua"
+  if [[ -d $TTS_DATA_DIR ]]; then
+    case $TTS_DATA_DIR in
+    "$HOME"/*) rm -rf -- "$TTS_DATA_DIR" ;;
+    *) die "refusing to remove TTS data outside the home directory: $TTS_DATA_DIR" ;;
+    esac
+  fi
   remove_input_include
   restart_audio
   reload_hyprland
@@ -719,6 +854,30 @@ cmd_gpu() {
   esac
 }
 
+cmd_tts() {
+  require_supported_model
+  case ${1:-status} in
+  status)
+    load_input_config
+    printf 'enabled=%s models=%s engine=%s\n' \
+      "$TTS_ENABLED" \
+      "$(tts_models_ready && echo ready || echo missing)" \
+      "$([[ -x $TTS_ENGINE ]] && echo ready || echo missing)"
+    ;;
+  setup)
+    shift
+    tts_setup "$@"
+    ;;
+  enable) [[ $# == 1 ]] || die "usage: omarchy-t2 tts enable"; tts_enable ;;
+  disable) [[ $# == 1 ]] || die "usage: omarchy-t2 tts disable"; tts_disable ;;
+  remove)
+    [[ $# == 1 || ($# == 2 && ($2 == --yes || $2 == -y)) ]] || die "usage: omarchy-t2 tts remove [--yes]"
+    tts_remove "$([[ ${2:-} == --yes || ${2:-} == -y ]] && echo true || echo false)"
+    ;;
+  *) die "usage: omarchy-t2 tts [status | setup [--yes] [--dry-run] | enable | disable | remove [--yes]]" ;;
+  esac
+}
+
 command=${1:-help}
 shift || true
 if [[ $EUID == 0 && -z $ROOT ]]; then
@@ -737,6 +896,7 @@ input) cmd_input "$@" ;;
 audio) cmd_audio "$@" ;;
 bluetooth) cmd_bluetooth "$@" ;;
 gpu) cmd_gpu "$@" ;;
+tts) cmd_tts "$@" ;;
 restore) cmd_restore "$@" ;;
 version|--version|-v) echo "omarchy-t2 $VERSION" ;;
 help|--help|-h) usage ;;

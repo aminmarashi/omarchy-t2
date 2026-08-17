@@ -7,6 +7,9 @@ test_dir=$(mktemp -d)
 root="$test_dir/root"
 home="$test_dir/home"
 dsp="$test_dir/dsp"
+qwen_tts="$test_dir/qwen-tts"
+TTS_TALKER=qwen-talker-1.7b-customvoice-Q8_0.gguf
+TTS_CODEC=qwen-tokenizer-12hz-Q8_0.gguf
 
 cleanup() {
   [[ $test_dir == /tmp/* ]] && rm -rf "$test_dir"
@@ -60,7 +63,16 @@ for kind in tweeters woofers; do
   done
 done
 
-make -s -C "$project_dir" DESTDIR="$root" DSP_SOURCE="$dsp" install
+printf '#!/bin/sh\nexit 0\n' >"$qwen_tts"
+chmod 0755 "$qwen_tts"
+
+make -s -C "$project_dir" \
+  DESTDIR="$root" \
+  DSP_SOURCE="$dsp" \
+  QWEN_TTS_BINARY="$qwen_tts" \
+  QWEN_TTS_LICENSE="$dsp/LICENSE" \
+  GGML_LICENSE="$dsp/LICENSE" \
+  install
 
 printf 'MacBookPro16,1\n' >"$root/sys/devices/virtual/dmi/id/product_name"
 printf '100\n' >"$root/sys/devices/platform/APP0001:00/battery_charge_limit"
@@ -74,12 +86,24 @@ printf '[Service]\nExecStart=/old-agent\n' >"$home/.config/systemd/user/bt-agent
 
 export HOME="$home"
 export XDG_CONFIG_HOME="$home/.config"
+export XDG_DATA_HOME="$home/.local/share"
 export XDG_STATE_HOME="$home/.local/state"
+export XDG_RUNTIME_DIR="$test_dir/runtime"
 export OMARCHY_T2_ROOT="$root"
 export OMARCHY_T2_SKIP_RUNTIME=true
+install -d "$XDG_RUNTIME_DIR"
+
+printf 'talker fixture\n' >"$test_dir/$TTS_TALKER"
+printf 'codec fixture\n' >"$test_dir/$TTS_CODEC"
+export OMARCHY_T2_TTS_TALKER_URL="file://$test_dir/$TTS_TALKER"
+export OMARCHY_T2_TTS_CODEC_URL="file://$test_dir/$TTS_CODEC"
+export OMARCHY_T2_TTS_TALKER_SHA256
+OMARCHY_T2_TTS_TALKER_SHA256=$(sha256sum "$test_dir/$TTS_TALKER" | awk '{print $1}')
+export OMARCHY_T2_TTS_CODEC_SHA256
+OMARCHY_T2_TTS_CODEC_SHA256=$(sha256sum "$test_dir/$TTS_CODEC" | awk '{print $1}')
 
 cli="$root/usr/bin/omarchy-t2"
-"$cli" version | grep -q '^omarchy-t2 0.1.0$'
+"$cli" version | grep -q '^omarchy-t2 0.2.0$'
 "$cli" setup --dry-run
 assert_file_contains "$root/etc/t2fand.conf" 'old fan config'
 assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
@@ -99,6 +123,22 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = false'
 assert_exists "$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
 assert_exists "$home/.config/systemd/user/bt-agent.service.d/omarchy-t2.conf"
 
+"$cli" tts setup --dry-run
+assert_not_exists "$home/.local/share/omarchy-t2/tts"
+"$cli" tts setup --yes
+assert_exists "$home/.local/share/omarchy-t2/tts/models/$TTS_TALKER"
+assert_exists "$home/.local/share/omarchy-t2/tts/models/$TTS_CODEC"
+assert_file_contains "$home/.config/omarchy-t2/config" 'TTS_ENABLED=true'
+assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'hl.unbind("SUPER + R")'
+assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'o.bind("SUPER + E", "Pause or resume selected text", "omarchy-tts toggle-pause")'
+"$cli" tts status | grep -q '^enabled=true models=ready engine=ready$'
+"$cli" tts disable
+assert_file_contains "$home/.config/omarchy-t2/config" 'TTS_ENABLED=false'
+assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if false then'
+"$cli" tts enable
+assert_file_contains "$home/.config/omarchy-t2/config" 'TTS_ENABLED=true'
+assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if true then'
+
 "$cli" battery limit 80
 "$cli" fan profile quiet
 "$cli" input tap on
@@ -117,6 +157,7 @@ assert_file_contains "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
 assert_file_contains "$root/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf" 'old speaker config'
 assert_file_contains "$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" 'old mic config'
 assert_not_exists "$home/.config/hypr/omarchy-t2.lua"
+assert_not_exists "$home/.local/share/omarchy-t2/tts"
 if grep -q '^-- omarchy-t2:start$' "$home/.config/hypr/hyprland.lua"; then
   fail "Hyprland include survived restore"
 fi

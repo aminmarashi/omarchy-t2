@@ -1,0 +1,121 @@
+#!/bin/bash
+
+set -euo pipefail
+
+export VK_DRIVER_FILES=${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/radeon_icd.json}
+export GGML_VK_VISIBLE_DEVICES=${GGML_VK_VISIBLE_DEVICES:-0}
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-tts"
+pid_file="$runtime_dir/player.pid"
+generation_log="$runtime_dir/generation.log"
+tts_data_dir="${OMARCHY_T2_TTS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-t2/tts}"
+synthesizer="${OMARCHY_T2_TTS_ENGINE:-/usr/lib/omarchy-t2/qwen-tts}"
+model="$tts_data_dir/models/qwen-talker-1.7b-customvoice-Q8_0.gguf"
+codec="$tts_data_dir/models/qwen-tokenizer-12hz-Q8_0.gguf"
+
+mkdir -p "$runtime_dir"
+
+player_pid() {
+  [[ -f $pid_file ]] || return 1
+  local pid player_executable
+  read -r pid <"$pid_file"
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -e /proc/$pid/exe ]] || return 1
+  player_executable=$(readlink -f "$(command -v pw-play)")
+  [[ $(readlink -f "/proc/$pid/exe") == "$player_executable" ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+stop_player() {
+  local pid
+  if pid=$(player_pid); then
+    : >"$pid_file"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  else
+    : >"$pid_file"
+  fi
+}
+
+require_tts() {
+  if [[ ! -x $synthesizer || ! -f $model || ! -f $codec ]]; then
+    notify-send -u critical "Read selected text" "Run 'omarchy-t2 tts setup' first"
+    exit 1
+  fi
+}
+
+stream_selection() {
+  local text=$1 player status current_pid
+
+  printf '%s' "$text" | "$synthesizer" \
+    --model "$model" \
+    --codec "$codec" \
+    --speaker vivian \
+    --lang English \
+    --instruct "Speak as a friendly young adult woman with clear natural articulation, gentle positive energy, subtle expression, and an even conversational delivery. Sound engaged but calm, never overly enthusiastic." \
+    --seed 42 \
+    -o - 2>"$generation_log" |
+    ffmpeg -hide_banner -loglevel error -i pipe:0 -filter:a atempo=1.25 \
+      -c:a pcm_s16le -ar 24000 -ac 1 -f s16le pipe:1 2>>"$generation_log" |
+    pw-play --raw --rate 24000 --channels 1 --format s16 - >/dev/null 2>&1 &
+  player=$!
+  printf '%s\n' "$player" >"$pid_file"
+
+  if wait "$player"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  current_pid=""
+  [[ -f $pid_file ]] && read -r current_pid <"$pid_file"
+  if [[ $current_pid == "$player" ]]; then
+    : >"$pid_file"
+    if ((status != 0)); then
+      notify-send -u critical "Read selected text" "Speech generation failed"
+    fi
+  fi
+}
+
+read_selection() {
+  local text
+  require_tts
+  text=$(wl-paste --primary --no-newline 2>/dev/null || true)
+  if [[ -z ${text//[[:space:]]/} ]]; then
+    notify-send -u low "Read selected text" "Select some text first"
+    exit 1
+  fi
+
+  stop_player
+  exec 9>"$runtime_dir/synthesis.lock"
+  if ! flock -w 3 9; then
+    notify-send -u low "Read selected text" "Previous speech is still stopping"
+    exit 1
+  fi
+
+  stream_selection "$text" &
+}
+
+toggle_pause() {
+  local pid state
+  if ! pid=$(player_pid); then
+    notify-send -u low "Read selected text" "Nothing is currently being read"
+    exit 1
+  fi
+
+  state=$(awk '{ print $3 }' "/proc/$pid/stat")
+  if [[ $state == T ]]; then
+    kill -CONT "$pid"
+    notify-send -u low "Read selected text" "Resumed"
+  else
+    kill -STOP "$pid"
+    notify-send -u low "Read selected text" "Paused"
+  fi
+}
+
+case ${1:-} in
+read) read_selection ;;
+toggle-pause) toggle_pause ;;
+stop) stop_player ;;
+*) echo "usage: omarchy-tts {read|toggle-pause|stop}" >&2; exit 2 ;;
+esac
