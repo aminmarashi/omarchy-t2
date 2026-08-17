@@ -1,9 +1,9 @@
 # Maintainer: Amin Marashi <me@amin.codes>
 
 pkgname=omarchy-t2
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Omarchy hardware support and tuning for Intel T2 MacBook Pros"
+pkgdesc="Omarchy hardware support, tuning, and Vulkan TTS for Intel T2 MacBook Pros"
 arch=('x86_64')
 url="https://github.com/aminmarashi/omarchy-t2"
 license=('MIT')
@@ -14,15 +14,19 @@ depends=(
   'bluez'
   'calf'
   'coreutils'
+  'curl'
+  'ffmpeg'
   'findutils'
   'gawk'
   'glib2'
   'grep'
   'libpulse'
+  'libnotify'
   'linux-t2'
   'lsp-plugins-lv2'
   'omarchy>=4.0.0'
   'pipewire'
+  'pipewire-audio'
   'pipewire-pulse'
   'python'
   'python-dbus'
@@ -31,25 +35,69 @@ depends=(
   'swh-plugins'
   'systemd'
   't2fanrd'
+  'util-linux'
+  'vulkan-icd-loader'
+  'vulkan-radeon'
   'wireplumber'
+  'wl-clipboard'
 )
-makedepends=('patch')
+makedepends=(
+  'cmake'
+  'git'
+  'ninja'
+  'patch'
+  'shaderc'
+  'spirv-headers'
+  'vulkan-headers'
+)
+options=('!lto')
 backup=('etc/omarchy-t2.conf')
 install=omarchy-t2.install
 
+_source_commit=5b67929d1a47afd77af3f7c17005160b71d1fc5b
+_qwentts_commit=a8a7716b530e49fed537c57711247c12fbbb903c
+_ggml_commit=c044c6f03892f9d5e98213b05f8afea1f8b0d3c9
 _dsp_commit=8d3edcbfcf17649279927fb12130b8575e912d2e
 source=(
-  "$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+  "$pkgname::git+$url.git#commit=$_source_commit"
+  "qwentts::git+https://github.com/ServeurpersoCom/qwentts.cpp.git#commit=$_qwentts_commit"
+  "ggml::git+https://github.com/ServeurpersoCom/ggml.git#commit=$_ggml_commit"
   "t2-apple-audio-dsp-$_dsp_commit.tar.gz::https://github.com/lemmyg/t2-apple-audio-dsp/archive/$_dsp_commit.tar.gz"
 )
 sha256sums=(
-  '92b1b269e8258efee84dc23390bccfed2fc9d69b49c9c7386473547c78274d0d'
+  'SKIP'
+  'SKIP'
+  'SKIP'
   '24370f3c1a9bbebb18568a9247f992b6c630356e6b62178568aed25d9efd792c'
 )
 
+prepare() {
+  git -C qwentts submodule init
+  git -C qwentts config submodule.ggml.url "$srcdir/ggml"
+  git -C qwentts -c protocol.file.allow=always submodule update
+}
+
+build() {
+  cmake \
+    -S qwentts \
+    -B qwentts-build \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_SKIP_RPATH=ON \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DGGML_CCACHE=OFF \
+    -DGGML_NATIVE=OFF \
+    -DGGML_VULKAN=ON
+  cmake --build qwentts-build --target qwen-tts
+}
+
 package() {
-  make -C "$pkgname-$pkgver" \
+  make -C "$pkgname" \
     DESTDIR="$pkgdir" \
     DSP_SOURCE="$srcdir/t2-apple-audio-dsp-$_dsp_commit" \
+    QWEN_TTS_BINARY="$srcdir/qwentts-build/qwen-tts" \
+    QWEN_TTS_LICENSE="$srcdir/qwentts/LICENSE" \
+    GGML_LICENSE="$srcdir/qwentts/ggml/LICENSE" \
     install
 }
