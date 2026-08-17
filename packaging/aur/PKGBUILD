@@ -1,0 +1,55 @@
+# Maintainer: Amin Marashi <me@amin.codes>
+
+pkgname=omarchy-t2
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Omarchy hardware support and tuning for Intel T2 MacBook Pros"
+arch=('x86_64')
+url="https://github.com/aminmarashi/omarchy-t2"
+license=('MIT')
+depends=(
+  'apple-bcm-firmware'
+  'apple-t2-audio-config'
+  'bash'
+  'bluez'
+  'calf'
+  'coreutils'
+  'findutils'
+  'gawk'
+  'glib2'
+  'grep'
+  'libpulse'
+  'linux-t2'
+  'lsp-plugins-lv2'
+  'omarchy>=4.0.0'
+  'pipewire'
+  'pipewire-pulse'
+  'python'
+  'python-dbus'
+  'python-gobject'
+  'sudo'
+  'swh-plugins'
+  'systemd'
+  't2fanrd'
+  'wireplumber'
+)
+makedepends=('patch')
+backup=('etc/omarchy-t2.conf')
+install=omarchy-t2.install
+
+_dsp_commit=8d3edcbfcf17649279927fb12130b8575e912d2e
+source=(
+  "$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+  "t2-apple-audio-dsp-$_dsp_commit.tar.gz::https://github.com/lemmyg/t2-apple-audio-dsp/archive/$_dsp_commit.tar.gz"
+)
+sha256sums=(
+  '92b1b269e8258efee84dc23390bccfed2fc9d69b49c9c7386473547c78274d0d'
+  '24370f3c1a9bbebb18568a9247f992b6c630356e6b62178568aed25d9efd792c'
+)
+
+package() {
+  make -C "$pkgname-$pkgver" \
+    DESTDIR="$pkgdir" \
+    DSP_SOURCE="$srcdir/t2-apple-audio-dsp-$_dsp_commit" \
+    install
+}
