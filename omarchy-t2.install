@@ -1,0 +1,12 @@
+post_install() {
+  echo
+  echo "Run 'omarchy-t2 setup' as your normal Omarchy user to apply T2 defaults."
+  echo "Preview first with 'omarchy-t2 setup --dry-run'."
+  echo
+}
+
+post_upgrade() {
+  echo
+  echo "Run 'omarchy-t2 doctor' after upgrading to verify hardware support."
+  echo
+}

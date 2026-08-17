@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -euo pipefail
+
+source_name="effect_output.filter-chain-t2-mic"
+
+ensure_unmuted() {
+  pactl set-source-mute "$source_name" 0 2>/dev/null || true
+}
+
+ensure_unmuted
+pactl subscribe | while IFS= read -r event; do
+  if [[ $event == *" on source "* || $event == *" on server "* ]]; then
+    if pactl get-source-mute "$source_name" 2>/dev/null | grep -q '^Mute: yes$'; then
+      ensure_unmuted
+    fi
+  fi
+done

@@ -1,0 +1,1 @@
+ACTION=="add", SUBSYSTEM=="acpi", KERNEL=="APP0001:00", TAG+="systemd", ENV{SYSTEMD_WANTS}+="omarchy-t2-battery-limit.service"

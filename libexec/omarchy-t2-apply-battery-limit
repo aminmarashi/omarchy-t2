@@ -1,0 +1,21 @@
+#!/bin/bash
+
+set -euo pipefail
+
+root=${OMARCHY_T2_ROOT:-}
+config="$root/etc/omarchy-t2.conf"
+sys_devices="$root/sys/devices"
+
+[[ -r $config ]] || exit 0
+# shellcheck source=/dev/null
+source "$config"
+
+limit=${BATTERY_LIMIT:-95}
+if [[ ! $limit =~ ^[0-9]+$ ]] || ((limit < 50 || limit > 100)); then
+  echo "Invalid BATTERY_LIMIT in $config: $limit" >&2
+  exit 1
+fi
+
+limit_path=$(find "$sys_devices" -path '*/APP0001:00/battery_charge_limit' -print -quit 2>/dev/null)
+[[ -n $limit_path ]] || exit 0
+printf '%s\n' "$limit" >"$limit_path"

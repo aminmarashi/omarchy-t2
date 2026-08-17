@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply the Omarchy T2 battery charge limit
+ConditionPathExists=/etc/omarchy-t2.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-t2/apply-battery-limit
+
+[Install]
+WantedBy=multi-user.target

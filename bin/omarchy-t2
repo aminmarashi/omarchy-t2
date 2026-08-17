@@ -1,0 +1,744 @@
+#!/bin/bash
+
+set -euo pipefail
+
+VERSION=0.1.0
+SUPPORTED_MODEL=MacBookPro16,1
+
+ROOT=${OMARCHY_T2_ROOT:-}
+SHARE_DIR=${OMARCHY_T2_SHARE_DIR:-$ROOT/usr/share/omarchy-t2}
+LIB_DIR=${OMARCHY_T2_LIB_DIR:-$ROOT/usr/lib/omarchy-t2}
+SYSTEM_CONFIG="$ROOT/etc/omarchy-t2.conf"
+SYSTEM_STATE="$ROOT/var/lib/omarchy-t2"
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-t2"
+USER_CONFIG="$USER_CONFIG_DIR/config"
+USER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-t2"
+DMI_PATH=${OMARCHY_T2_DMI_PATH:-$ROOT/sys/devices/virtual/dmi/id/product_name}
+SKIP_RUNTIME=${OMARCHY_T2_SKIP_RUNTIME:-false}
+DRY_RUN=false
+
+usage() {
+  cat <<'EOF'
+Omarchy support and tuning for Intel T2 MacBook Pros.
+
+Usage:
+  omarchy-t2 setup [--defaults] [--yes] [--dry-run]
+  omarchy-t2 status
+  omarchy-t2 doctor
+  omarchy-t2 battery [status | limit <50-100>]
+  omarchy-t2 fan [status | profile <cool|balanced|quiet>]
+  omarchy-t2 input [status | keyboard <layout> [variant] | tap <on|off>]
+  omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]
+  omarchy-t2 bluetooth [status | enable | disable]
+  omarchy-t2 gpu [status | integrated | dedicated]
+  omarchy-t2 restore [--yes]
+  omarchy-t2 version
+
+The initial release supports MacBookPro16,1 exactly. Hardware-changing commands
+refuse to run on any other model.
+EOF
+}
+
+die() {
+  echo "omarchy-t2: $*" >&2
+  exit 1
+}
+
+note() {
+  echo "==> $*"
+}
+
+run_root() {
+  if [[ $DRY_RUN == true ]]; then
+    printf '    +'
+    printf ' %q' "$@"
+    printf '\n'
+  elif [[ -n $ROOT || $EUID == 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+runtime() {
+  [[ -z $ROOT && $SKIP_RUNTIME != true && $DRY_RUN != true ]]
+}
+
+user_systemctl() {
+  runtime || return 0
+  systemctl --user "$@"
+}
+
+model_name() {
+  if [[ -r $DMI_PATH ]]; then
+    tr -d '\n' <"$DMI_PATH"
+  else
+    echo unknown
+  fi
+}
+
+require_supported_model() {
+  local model
+  model=$(model_name)
+  [[ $model == "$SUPPORTED_MODEL" ]] || die "unsupported model '$model' (expected $SUPPORTED_MODEL)"
+}
+
+confirm() {
+  local prompt=$1
+  local assume_yes=${2:-false}
+
+  [[ $assume_yes == true || $DRY_RUN == true ]] && return 0
+  if command -v gum >/dev/null 2>&1; then
+    gum confirm "$prompt"
+  else
+    read -r -p "$prompt [y/N] " answer
+    [[ ${answer,,} == y || ${answer,,} == yes ]]
+  fi
+}
+
+system_backup_path() {
+  local target=$1
+  local relative=$target
+  [[ -n $ROOT ]] && relative=${target#"$ROOT"}
+  printf '%s/backups%s' "$SYSTEM_STATE" "$relative"
+}
+
+user_backup_path() {
+  local target=$1
+  local relative=${target#"$HOME"}
+  printf '%s/backups/home%s' "$USER_STATE" "$relative"
+}
+
+backup_system_file() {
+  local target=$1
+  local backup
+  backup=$(system_backup_path "$target")
+
+  if [[ -e $target || -L $target ]] && [[ ! -e $backup && ! -L $backup ]]; then
+    run_root install -d -m 0755 "$(dirname "$backup")"
+    run_root cp -a "$target" "$backup"
+  fi
+}
+
+backup_user_file() {
+  local target=$1
+  local backup
+  backup=$(user_backup_path "$target")
+
+  if [[ -e $target || -L $target ]] && [[ ! -e $backup && ! -L $backup ]]; then
+    install -d -m 0755 "$(dirname "$backup")"
+    cp -a "$target" "$backup"
+  fi
+}
+
+replace_system_link() {
+  local source=$1
+  local target=$2
+
+  [[ -e $source ]] || die "package asset is missing: $source"
+  if [[ -L $target && $(readlink "$target") == "$source" ]]; then
+    return 0
+  fi
+  backup_system_file "$target"
+  run_root install -d -m 0755 "$(dirname "$target")"
+  run_root rm -f "$target"
+  run_root ln -s "$source" "$target"
+}
+
+replace_user_link() {
+  local source=$1
+  local target=$2
+
+  [[ -e $source ]] || die "package asset is missing: $source"
+  if [[ -L $target && $(readlink "$target") == "$source" ]]; then
+    return 0
+  fi
+  backup_user_file "$target"
+  install -d -m 0755 "$(dirname "$target")"
+  rm -f "$target"
+  ln -s "$source" "$target"
+}
+
+restore_system_file() {
+  local target=$1
+  local backup
+  backup=$(system_backup_path "$target")
+
+  run_root rm -f "$target"
+  if [[ -e $backup || -L $backup ]]; then
+    run_root install -d -m 0755 "$(dirname "$target")"
+    run_root cp -a "$backup" "$target"
+  fi
+}
+
+restore_user_file() {
+  local target=$1
+  local backup
+  backup=$(user_backup_path "$target")
+
+  rm -f "$target"
+  if [[ -e $backup || -L $backup ]]; then
+    install -d -m 0755 "$(dirname "$target")"
+    cp -a "$backup" "$target"
+  fi
+}
+
+install_root_text() {
+  local target=$1
+  local mode=$2
+  local temporary
+  temporary=$(mktemp)
+  cat >"$temporary"
+  backup_system_file "$target"
+  run_root install -Dm"$mode" "$temporary" "$target"
+  rm -f "$temporary"
+}
+
+write_setting() {
+  local file=$1
+  local key=$2
+  local value=$3
+  local scope=$4
+  local temporary
+  temporary=$(mktemp)
+
+  if [[ -r $file ]]; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { found = 0 }
+      $0 ~ "^" key "=" { print key "=" value; found = 1; next }
+      { print }
+      END { if (!found) print key "=" value }
+    ' "$file" >"$temporary"
+  else
+    printf '%s=%s\n' "$key" "$value" >"$temporary"
+  fi
+
+  if [[ $scope == root ]]; then
+    run_root install -Dm0644 "$temporary" "$file"
+  else
+    install -Dm0644 "$temporary" "$file"
+  fi
+  rm -f "$temporary"
+}
+
+load_system_config() {
+  BATTERY_LIMIT=95
+  FAN_PROFILE=cool
+  GPU_MODE=integrated
+  if [[ -r $SYSTEM_CONFIG ]]; then
+    # shellcheck source=/dev/null
+    source "$SYSTEM_CONFIG"
+  fi
+}
+
+load_input_config() {
+  KEYBOARD_LAYOUT=us
+  KEYBOARD_VARIANT=mac-iso
+  TAP_TO_CLICK=false
+  if [[ -r $USER_CONFIG ]]; then
+    # shellcheck source=/dev/null
+    source "$USER_CONFIG"
+  fi
+}
+
+setup_touchpad() {
+  local legacy="$ROOT/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
+  local target="$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules"
+
+  if [[ -e $legacy || -L $legacy ]]; then
+    backup_system_file "$legacy"
+    run_root rm -f "$legacy"
+  fi
+  replace_system_link "$SHARE_DIR/rules/99-omarchy-apple-t2-touchpad.rules" "$target"
+
+  if runtime; then
+    sudo udevadm control --reload
+    sudo udevadm trigger --subsystem-match=input --action=change
+  fi
+}
+
+battery_limit() {
+  local limit=$1
+  if [[ ! $limit =~ ^[0-9]+$ ]] || ((limit < 50 || limit > 100)); then
+    die "battery limit must be between 50 and 100"
+  fi
+
+  write_setting "$SYSTEM_CONFIG" BATTERY_LIMIT "$limit" root
+  replace_system_link "$SHARE_DIR/rules/90-omarchy-t2-battery.rules" "$ROOT/etc/udev/rules.d/90-omarchy-t2-battery.rules"
+  if runtime; then
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now omarchy-t2-battery-limit.service
+  fi
+  note "Battery charge limit: $limit%"
+}
+
+fan_profile() {
+  local profile=$1
+  local source="$SHARE_DIR/fan/t2fand-$profile.conf"
+  [[ -f $source ]] || die "fan profile must be cool, balanced, or quiet"
+
+  backup_system_file "$ROOT/etc/t2fand.conf"
+  run_root install -Dm0644 "$source" "$ROOT/etc/t2fand.conf"
+  write_setting "$SYSTEM_CONFIG" FAN_PROFILE "$profile" root
+  if runtime; then
+    sudo systemctl enable --now t2fanrd.service
+    sudo systemctl restart t2fanrd.service
+  fi
+  note "Fan profile: $profile"
+}
+
+write_input_module() {
+  local target="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/omarchy-t2.lua"
+  local temporary
+  load_input_config
+  temporary=$(mktemp)
+  cat >"$temporary" <<EOF
+-- Managed by omarchy-t2. Use omarchy-t2 input ... to change these values.
+hl.config({
+  input = {
+    kb_layout = "$KEYBOARD_LAYOUT",
+    kb_variant = "$KEYBOARD_VARIANT",
+    touchpad = {
+      tap_to_click = $TAP_TO_CLICK,
+    },
+  },
+})
+EOF
+  if [[ ! -f $target ]] || ! grep -Fq -- '-- Managed by omarchy-t2.' "$target"; then
+    backup_user_file "$target"
+  fi
+  install -Dm0644 "$temporary" "$target"
+  rm -f "$temporary"
+}
+
+ensure_input_include() {
+  local hyprland="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua"
+  local temporary
+  [[ -f $hyprland ]] || die "Omarchy Hyprland config is missing: $hyprland"
+  grep -q '^-- omarchy-t2:start$' "$hyprland" && return 0
+
+  backup_user_file "$hyprland"
+  temporary=$(mktemp)
+  cp "$hyprland" "$temporary"
+  cat >>"$temporary" <<'EOF'
+
+-- omarchy-t2:start
+require("hypr.omarchy-t2")
+-- omarchy-t2:end
+EOF
+  install -m0644 "$temporary" "$hyprland"
+  rm -f "$temporary"
+}
+
+reload_hyprland() {
+  if runtime && command -v hyprctl >/dev/null 2>&1 && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    hyprctl reload >/dev/null
+  fi
+}
+
+input_apply() {
+  write_input_module
+  ensure_input_include
+  reload_hyprland
+}
+
+input_keyboard() {
+  local layout=$1
+  local variant=${2:-}
+  [[ $layout =~ ^[A-Za-z0-9,_+-]+$ ]] || die "invalid keyboard layout"
+  [[ -z $variant || $variant =~ ^[A-Za-z0-9,_+-]+$ ]] || die "invalid keyboard variant"
+  write_setting "$USER_CONFIG" KEYBOARD_LAYOUT "$layout" user
+  write_setting "$USER_CONFIG" KEYBOARD_VARIANT "$variant" user
+  input_apply
+  note "Keyboard: $layout${variant:+ ($variant)}"
+}
+
+input_tap() {
+  local value=$1
+  case $value in
+  on) write_setting "$USER_CONFIG" TAP_TO_CLICK true user ;;
+  off) write_setting "$USER_CONFIG" TAP_TO_CLICK false user ;;
+  *) die "tap must be on or off" ;;
+  esac
+  input_apply
+  note "Tap-to-click: $value"
+}
+
+audio_speakers_enable() {
+  local legacy="$ROOT/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf"
+  local target="$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
+  if [[ -e $legacy || -L $legacy ]]; then
+    backup_system_file "$legacy"
+    run_root rm -f "$legacy"
+  fi
+  replace_system_link "$SHARE_DIR/audio/10-omarchy-t2-speakers.conf" "$target"
+}
+
+audio_speakers_disable() {
+  restore_system_file "$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
+  restore_system_file "$ROOT/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf"
+}
+
+audio_mic_enable() {
+  local config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+  local old_service="$config_home/systemd/user/omarchy-mic-guard.service"
+  replace_user_link "$SHARE_DIR/audio/10-omarchy-t2-mic.conf" "$config_home/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
+
+  if [[ -e $old_service || -L $old_service ]]; then
+    user_systemctl disable --now omarchy-mic-guard.service >/dev/null 2>&1 || true
+    backup_user_file "$old_service"
+    rm -f "$old_service"
+  fi
+  user_systemctl daemon-reload
+  user_systemctl enable --now omarchy-t2-mic-guard.service
+}
+
+audio_mic_disable() {
+  local config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+  user_systemctl disable --now omarchy-t2-mic-guard.service >/dev/null 2>&1 || true
+  restore_user_file "$config_home/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
+  restore_user_file "$config_home/systemd/user/omarchy-mic-guard.service"
+  user_systemctl daemon-reload
+}
+
+restart_audio() {
+  if runtime; then
+    systemctl --user restart wireplumber pipewire pipewire-pulse
+  fi
+}
+
+audio_defaults() {
+  runtime || return 0
+  sleep 1
+  pactl set-default-sink effect_input.filter-chain-speakers 2>/dev/null || true
+  pactl set-sink-volume effect_input.filter-chain-speakers 25% 2>/dev/null || true
+  pactl set-default-source effect_output.filter-chain-t2-mic 2>/dev/null || true
+}
+
+bluetooth_enable() {
+  local config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+  local dropin="$config_home/systemd/user/bt-agent.service.d/omarchy-t2.conf"
+  local legacy="$config_home/systemd/user/bt-agent.service.d/upstream-fix.conf"
+  local agent="$LIB_DIR/bluetooth-agent"
+  local temporary
+
+  replace_user_link "$SHARE_DIR/wireplumber/bluetooth-a2dp-autoconnect.conf" "$config_home/wireplumber/wireplumber.conf.d/omarchy-t2-a2dp-autoconnect.conf"
+  if [[ -e $legacy || -L $legacy ]]; then
+    backup_user_file "$legacy"
+    rm -f "$legacy"
+  fi
+  if command -v omarchy-bluetooth-agent >/dev/null 2>&1; then
+    agent=$(command -v omarchy-bluetooth-agent)
+  fi
+  temporary=$(mktemp)
+  cat >"$temporary" <<EOF
+# Managed by omarchy-t2.
+[Service]
+ExecStart=
+ExecStart=$agent
+EOF
+  if [[ ! -f $dropin ]] || ! grep -Fq -- '# Managed by omarchy-t2.' "$dropin"; then
+    backup_user_file "$dropin"
+  fi
+  install -Dm0644 "$temporary" "$dropin"
+  rm -f "$temporary"
+  user_systemctl daemon-reload
+  user_systemctl enable --now bt-agent.service
+  user_systemctl restart bt-agent.service
+}
+
+bluetooth_disable() {
+  local config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+  restore_user_file "$config_home/systemd/user/bt-agent.service.d/omarchy-t2.conf"
+  restore_user_file "$config_home/systemd/user/bt-agent.service.d/upstream-fix.conf"
+  restore_user_file "$config_home/wireplumber/wireplumber.conf.d/omarchy-t2-a2dp-autoconnect.conf"
+  user_systemctl daemon-reload
+  user_systemctl restart bt-agent.service
+}
+
+rebuild_boot() {
+  runtime || return 0
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    sudo limine-mkinitcpio
+  else
+    sudo mkinitcpio -P
+  fi
+}
+
+gpu_mode() {
+  local mode=$1
+  local gmux="$ROOT/etc/modprobe.d/apple-gmux.conf"
+  local dpm="$ROOT/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
+  local renderer="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
+
+  case $mode in
+  integrated)
+    printf 'options apple-gmux force_igd=y\n' | install_root_text "$gmux" 0644
+    replace_system_link "$SHARE_DIR/rules/30-omarchy-t2-amdgpu-pm.rules" "$dpm"
+    replace_user_link "$SHARE_DIR/uwsm/20-omarchy-t2-gpu" "$renderer"
+    ;;
+  dedicated)
+    printf 'options apple-gmux force_igd=n\n' | install_root_text "$gmux" 0644
+    restore_system_file "$dpm"
+    restore_user_file "$renderer"
+    ;;
+  *) die "GPU mode must be integrated or dedicated" ;;
+  esac
+
+  write_setting "$SYSTEM_CONFIG" GPU_MODE "$mode" root
+  rebuild_boot
+  note "GPU mode: $mode (reboot required)"
+}
+
+reset_to_package_defaults() {
+  run_root install -Dm0644 "$SHARE_DIR/defaults/omarchy-t2.conf" "$SYSTEM_CONFIG"
+  install -Dm0644 "$SHARE_DIR/defaults/input.conf" "$USER_CONFIG"
+}
+
+cmd_setup() {
+  local assume_yes=false
+  local defaults=false
+
+  while (($#)); do
+    case $1 in
+    --yes|-y) assume_yes=true ;;
+    --defaults) defaults=true ;;
+    --dry-run) DRY_RUN=true ;;
+    *) die "unknown setup option: $1" ;;
+    esac
+    shift
+  done
+
+  require_supported_model
+  cat <<EOF
+Omarchy T2 will configure $SUPPORTED_MODEL with:
+  • internal touchpad classification and palm rejection
+  • 95% battery limit and cool fan profile
+  • Mac ISO keyboard layout with tap-to-click disabled
+  • protected six-speaker DSP and normalized microphone DSP
+  • Bluetooth passkey display and A2DP auto-connect
+  • Intel-first integrated graphics mode
+
+Existing files are backed up under:
+  $SYSTEM_STATE
+  $USER_STATE
+EOF
+  confirm "Apply the Omarchy T2 defaults?" "$assume_yes" || exit 0
+  if [[ $DRY_RUN == true ]]; then
+    note "Dry run complete. No changes made."
+    return 0
+  fi
+  run_root true
+
+  [[ $defaults == true ]] && reset_to_package_defaults
+  load_system_config
+  if [[ ! -r $USER_CONFIG ]]; then
+    install -Dm0644 "$SHARE_DIR/defaults/input.conf" "$USER_CONFIG"
+  fi
+
+  setup_touchpad
+  battery_limit "$BATTERY_LIMIT"
+  fan_profile "$FAN_PROFILE"
+  input_apply
+  audio_speakers_enable
+  audio_mic_enable
+  bluetooth_enable
+  restart_audio
+  audio_defaults
+  gpu_mode "$GPU_MODE"
+
+  note "Setup complete. Reboot to activate the graphics selection."
+}
+
+cmd_status() {
+  local actual_battery=unavailable
+  local battery_path
+  load_system_config
+  load_input_config
+  battery_path=$(find "$ROOT/sys/devices" -path '*/APP0001:00/battery_charge_limit' -print -quit 2>/dev/null || true)
+  [[ -r $battery_path ]] && actual_battery=$(<"$battery_path")
+  cat <<EOF
+Model:          $(model_name)
+Battery limit:  $BATTERY_LIMIT% (hardware: $actual_battery)
+Fan profile:    $FAN_PROFILE
+GPU mode:       $GPU_MODE
+Keyboard:       $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+/$KEYBOARD_VARIANT}
+Tap-to-click:   $TAP_TO_CLICK
+Speaker DSP:    $([[ -e $ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf ]] && echo enabled || echo disabled)
+Microphone DSP: $([[ -e ${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf ]] && echo enabled || echo disabled)
+EOF
+}
+
+doctor_check() {
+  local label=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf '[ok]   %s\n' "$label"
+  else
+    printf '[fail] %s\n' "$label"
+    return 1
+  fi
+}
+
+cmd_doctor() {
+  local failures=0
+  doctor_check "Supported model" test "$(model_name)" = "$SUPPORTED_MODEL" || failures=$((failures + 1))
+  doctor_check "T2 kernel" grep -qi t2 /proc/sys/kernel/osrelease || failures=$((failures + 1))
+  doctor_check "Touchpad rule" test -e "$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules" || failures=$((failures + 1))
+  doctor_check "Battery service" systemctl is-enabled omarchy-t2-battery-limit.service || failures=$((failures + 1))
+  doctor_check "Fan service" systemctl is-active t2fanrd.service || failures=$((failures + 1))
+  doctor_check "Speaker DSP config" test -e "$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf" || failures=$((failures + 1))
+  doctor_check "Microphone DSP config" test -e "${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" || failures=$((failures + 1))
+  doctor_check "Speaker DSP node" pactl get-sink-info effect_input.filter-chain-speakers || failures=$((failures + 1))
+  doctor_check "Microphone DSP node" pactl get-source-info effect_output.filter-chain-t2-mic || failures=$((failures + 1))
+  ((failures == 0)) || return 1
+}
+
+remove_input_include() {
+  local hyprland="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua"
+  local temporary
+  [[ -f $hyprland ]] || return 0
+  temporary=$(mktemp)
+  awk '
+    $0 == "-- omarchy-t2:start" { skip = 1; next }
+    $0 == "-- omarchy-t2:end" { skip = 0; next }
+    !skip { print }
+  ' "$hyprland" >"$temporary"
+  install -m0644 "$temporary" "$hyprland"
+  rm -f "$temporary"
+}
+
+cmd_restore() {
+  local assume_yes=false
+  [[ ${1:-} == --yes || ${1:-} == -y ]] && assume_yes=true
+  require_supported_model
+  confirm "Restore files replaced by omarchy-t2?" "$assume_yes" || exit 0
+
+  user_systemctl disable --now omarchy-t2-mic-guard.service >/dev/null 2>&1 || true
+  if runtime; then
+    sudo systemctl disable --now omarchy-t2-battery-limit.service >/dev/null 2>&1 || true
+  fi
+
+  audio_speakers_disable
+  audio_mic_disable
+  bluetooth_disable
+  restore_system_file "$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules"
+  restore_system_file "$ROOT/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
+  restore_system_file "$ROOT/etc/udev/rules.d/90-omarchy-t2-battery.rules"
+  restore_system_file "$ROOT/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
+  restore_system_file "$ROOT/etc/t2fand.conf"
+  restore_system_file "$ROOT/etc/modprobe.d/apple-gmux.conf"
+  restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
+  restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/omarchy-t2.lua"
+  remove_input_include
+  restart_audio
+  reload_hyprland
+  note "Restored previous configuration. The package can now be removed safely."
+}
+
+cmd_battery() {
+  require_supported_model
+  case ${1:-status} in
+  status) load_system_config; echo "$BATTERY_LIMIT" ;;
+  limit) [[ $# == 2 ]] || die "usage: omarchy-t2 battery limit <50-100>"; battery_limit "$2" ;;
+  *) die "usage: omarchy-t2 battery [status | limit <50-100>]" ;;
+  esac
+}
+
+cmd_fan() {
+  require_supported_model
+  case ${1:-status} in
+  status) load_system_config; echo "$FAN_PROFILE" ;;
+  profile) [[ $# == 2 ]] || die "usage: omarchy-t2 fan profile <cool|balanced|quiet>"; fan_profile "$2" ;;
+  *) die "usage: omarchy-t2 fan [status | profile <cool|balanced|quiet>]" ;;
+  esac
+}
+
+cmd_input() {
+  require_supported_model
+  case ${1:-status} in
+  status) load_input_config; printf 'keyboard=%s/%s tap=%s\n' "$KEYBOARD_LAYOUT" "$KEYBOARD_VARIANT" "$TAP_TO_CLICK" ;;
+  keyboard) (($# >= 2 && $# <= 3)) || die "usage: omarchy-t2 input keyboard <layout> [variant]"; input_keyboard "$2" "${3:-}" ;;
+  tap) [[ $# == 2 ]] || die "usage: omarchy-t2 input tap <on|off>"; input_tap "$2" ;;
+  *) die "usage: omarchy-t2 input [status | keyboard <layout> [variant] | tap <on|off>]" ;;
+  esac
+}
+
+cmd_audio() {
+  require_supported_model
+  case ${1:-status} in
+  status)
+    cmd_status | grep -E '^(Speaker|Microphone) DSP:'
+    ;;
+  enable)
+    audio_speakers_enable; audio_mic_enable; restart_audio; audio_defaults
+    ;;
+  disable)
+    audio_speakers_disable; audio_mic_disable; restart_audio
+    ;;
+  speakers)
+    [[ $# == 2 ]] || die "usage: omarchy-t2 audio speakers <on|off>"
+    case $2 in
+    on) audio_speakers_enable ;;
+    off) audio_speakers_disable ;;
+    *) die "speakers must be on or off" ;;
+    esac
+    restart_audio
+    ;;
+  mic)
+    [[ $# == 2 ]] || die "usage: omarchy-t2 audio mic <on|off>"
+    case $2 in
+    on) audio_mic_enable ;;
+    off) audio_mic_disable ;;
+    *) die "mic must be on or off" ;;
+    esac
+    restart_audio
+    ;;
+  *) die "usage: omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]" ;;
+  esac
+}
+
+cmd_bluetooth() {
+  require_supported_model
+  case ${1:-status} in
+  status)
+    [[ -e ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/bt-agent.service.d/omarchy-t2.conf ]] && echo enabled || echo disabled
+    ;;
+  enable) bluetooth_enable; restart_audio ;;
+  disable) bluetooth_disable; restart_audio ;;
+  *) die "usage: omarchy-t2 bluetooth [status | enable | disable]" ;;
+  esac
+}
+
+cmd_gpu() {
+  require_supported_model
+  case ${1:-status} in
+  status) load_system_config; echo "$GPU_MODE" ;;
+  integrated|dedicated) gpu_mode "$1" ;;
+  *) die "usage: omarchy-t2 gpu [status | integrated | dedicated]" ;;
+  esac
+}
+
+command=${1:-help}
+shift || true
+if [[ $EUID == 0 && -z $ROOT ]]; then
+  case $command in
+  help|--help|-h|version|--version|-v) ;;
+  *) die "run this command as your normal Omarchy user; it requests sudo when needed" ;;
+  esac
+fi
+case $command in
+setup) cmd_setup "$@" ;;
+status) cmd_status ;;
+doctor) cmd_doctor ;;
+battery) cmd_battery "$@" ;;
+fan) cmd_fan "$@" ;;
+input) cmd_input "$@" ;;
+audio) cmd_audio "$@" ;;
+bluetooth) cmd_bluetooth "$@" ;;
+gpu) cmd_gpu "$@" ;;
+restore) cmd_restore "$@" ;;
+version|--version|-v) echo "omarchy-t2 $VERSION" ;;
+help|--help|-h) usage ;;
+*) usage >&2; exit 1 ;;
+esac
