@@ -35,6 +35,10 @@ omarchy-t2 setup --dry-run
 - Intel-first integrated graphics mode with the Radeon kept at low power
 
 The speaker DSP initially sets the processed sink to 25%. Raise it cautiously.
+Microphone selection remains automatic: external microphones take precedence
+when connected, with the processed internal microphone as the fallback.
+Enabling microphone DSP clears the source preference saved by version 0.1.0;
+select a source again afterward only if you want to override automatic routing.
 The configuration includes a hard limiter, but model-specific speaker tuning is
 still experimental and should never be used on a different Mac model.
 

@@ -407,12 +407,20 @@ restart_audio() {
   fi
 }
 
+audio_mic_defaults() {
+  runtime || return 0
+  # v0.1.0 pinned the DSP mic and stored its volume at a near-silent level.
+  # Reset both values when enabling DSP, then let WirePlumber route by priority.
+  wpctl clear-default 1 2>/dev/null || true
+  pactl set-source-volume effect_output.filter-chain-t2-mic 100% 2>/dev/null || true
+}
+
 audio_defaults() {
   runtime || return 0
   sleep 1
   pactl set-default-sink effect_input.filter-chain-speakers 2>/dev/null || true
   pactl set-sink-volume effect_input.filter-chain-speakers 25% 2>/dev/null || true
-  pactl set-default-source effect_output.filter-chain-t2-mic 2>/dev/null || true
+  audio_mic_defaults
 }
 
 bluetooth_enable() {
@@ -693,6 +701,10 @@ cmd_audio() {
     *) die "mic must be on or off" ;;
     esac
     restart_audio
+    if [[ $2 == on ]] && runtime; then
+      sleep 1
+      audio_mic_defaults
+    fi
     ;;
   *) die "usage: omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]" ;;
   esac
