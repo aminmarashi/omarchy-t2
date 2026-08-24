@@ -6,8 +6,11 @@ export VK_DRIVER_FILES=${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/radeon_icd.jso
 export GGML_VK_VISIBLE_DEVICES=${GGML_VK_VISIBLE_DEVICES:-0}
 
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-tts"
+job_pid_file="$runtime_dir/job.pid"
 pid_file="$runtime_dir/player.pid"
 generation_log="$runtime_dir/generation.log"
+source_audio="$runtime_dir/source.wav"
+playback_audio="$runtime_dir/speech.wav"
 tts_data_dir="${OMARCHY_T2_TTS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-t2/tts}"
 synthesizer="${OMARCHY_T2_TTS_ENGINE:-/usr/lib/omarchy-t2/qwen-tts}"
 model="$tts_data_dir/models/qwen-talker-1.7b-customvoice-Q4_K_M.gguf"
@@ -26,19 +29,36 @@ player_pid() {
   printf '%s\n' "$pid"
 }
 
-stop_player() {
-  local pid reader attempt alive
+job_pid() {
+  [[ -f $job_pid_file ]] || return 1
+  local pid
+  local -a command_line
+
+  read -r pid <"$job_pid_file"
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -e /proc/$pid/exe ]] || return 1
+  [[ $(readlink -f "/proc/$pid/exe") == "$(readlink -f "$(command -v bash)")" ]] || return 1
+  mapfile -d '' -t command_line <"/proc/$pid/cmdline"
+  [[ ${command_line[1]:-} == "$0" && ${command_line[2]:-} == read ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+stop_job() {
+  local pid job attempt alive
   local -a job_pids
 
-  if pid=$(player_pid); then
-    : >"$pid_file"
-    if reader=$(reader_pid "$pid"); then
-      read -ra job_pids <"/proc/$reader/task/$reader/children" || true
-      job_pids+=("$reader")
-    else
-      job_pids=("$pid")
-    fi
+  if job=$(job_pid); then
+    read -ra job_pids <"/proc/$job/task/$job/children" || true
+    job_pids+=("$job")
+  elif pid=$(player_pid); then
+    job_pids=("$pid")
+  else
+    job_pids=()
+  fi
 
+  : >"$job_pid_file"
+  : >"$pid_file"
+  if ((${#job_pids[@]})); then
     kill -TERM "${job_pids[@]}" 2>/dev/null || true
     kill -CONT "${job_pids[@]}" 2>/dev/null || true
 
@@ -51,21 +71,21 @@ stop_player() {
       sleep 0.05
     done
     ((alive == 0)) || kill -KILL "${job_pids[@]}" 2>/dev/null || true
-  else
-    : >"$pid_file"
   fi
+
+  rm -f "$source_audio" "$playback_audio"
 }
 
-reader_pid() {
-  local player=$1 pid
-  local -a command_line
+finish_job() {
+  local job=$1 error=${2:-} current_job=""
 
-  pid=$(awk '/^PPid:/ { print $2 }' "/proc/$player/status")
-  [[ $pid =~ ^[0-9]+$ ]] || return 1
-  [[ $(readlink -f "/proc/$pid/exe") == "$(readlink -f "$(command -v bash)")" ]] || return 1
-  mapfile -d '' -t command_line <"/proc/$pid/cmdline"
-  [[ ${command_line[1]:-} == "$0" && ${command_line[2]:-} == read ]] || return 1
-  printf '%s\n' "$pid"
+  [[ -f $job_pid_file ]] && read -r current_job <"$job_pid_file"
+  if [[ $current_job == "$job" ]]; then
+    : >"$job_pid_file"
+    : >"$pid_file"
+    rm -f "$source_audio" "$playback_audio"
+    [[ -z $error ]] || notify-send -u critical "Read selected text" "$error"
+  fi
 }
 
 require_tts() {
@@ -75,20 +95,32 @@ require_tts() {
   fi
 }
 
-stream_selection() {
-  local text=$1 player status current_pid
+render_and_play() {
+  local text=$1 job=$BASHPID player status
 
-  printf '%s' "$text" 9>&- | "$synthesizer" \
+  printf '%s\n' "$job" >"$job_pid_file"
+
+  if ! printf '%s' "$text" 9>&- | "$synthesizer" \
     --model "$model" \
     --codec "$codec" \
     --speaker vivian \
     --lang English \
     --instruct "Speak as a friendly young adult woman with clear natural articulation, gentle positive energy, subtle expression, and an even conversational delivery. Sound engaged but calm, never overly enthusiastic." \
     --seed 42 \
-    -o - 2>"$generation_log" 9>&- |
-    ffmpeg -hide_banner -loglevel error -i pipe:0 -filter:a atempo=1.25 \
-      -c:a pcm_s16le -ar 24000 -ac 1 -f s16le pipe:1 2>>"$generation_log" 9>&- |
-    pw-play --raw --rate 24000 --channels 1 --format s16 - >/dev/null 2>&1 9>&- &
+    -o "$source_audio" >"$generation_log" 2>&1 9>&-; then
+    finish_job "$job" "Speech generation failed"
+    return
+  fi
+
+  if ! ffmpeg -y -hide_banner -loglevel error -i "$source_audio" -filter:a atempo=1.25 \
+    -c:a pcm_s16le -ar 24000 -ac 1 "$playback_audio" 2>>"$generation_log" 9>&-; then
+    finish_job "$job" "Speech processing failed"
+    return
+  fi
+
+  rm -f "$source_audio"
+  notify-send -u low -t 1500 "Read selected text" "Playing"
+  pw-play "$playback_audio" >/dev/null 2>&1 9>&- &
   player=$!
   printf '%s\n' "$player" >"$pid_file"
 
@@ -98,13 +130,10 @@ stream_selection() {
     status=$?
   fi
 
-  current_pid=""
-  [[ -f $pid_file ]] && read -r current_pid <"$pid_file"
-  if [[ $current_pid == "$player" ]]; then
-    : >"$pid_file"
-    if ((status != 0)); then
-      notify-send -u critical "Read selected text" "Speech generation failed"
-    fi
+  if ((status == 0)); then
+    finish_job "$job"
+  else
+    finish_job "$job" "Speech playback failed"
   fi
 }
 
@@ -117,20 +146,26 @@ read_selection() {
     exit 1
   fi
 
-  stop_player
+  stop_job
   exec 9>"$runtime_dir/synthesis.lock"
   if ! flock -w 3 9; then
     notify-send -u low "Read selected text" "Previous speech is still stopping"
     exit 1
   fi
 
-  stream_selection "$text" &
+  notify-send -u low -t 2000 "Read selected text" "Generating speech…"
+  render_and_play "$text" &
+  printf '%s\n' "$!" >"$job_pid_file"
 }
 
 toggle_pause() {
   local pid state
   if ! pid=$(player_pid); then
-    notify-send -u low "Read selected text" "Nothing is currently being read"
+    if job_pid >/dev/null; then
+      notify-send -u low "Read selected text" "Speech is still being generated"
+    else
+      notify-send -u low "Read selected text" "Nothing is currently being read"
+    fi
     exit 1
   fi
 
@@ -147,6 +182,6 @@ toggle_pause() {
 case ${1:-} in
 read) read_selection ;;
 toggle-pause) toggle_pause ;;
-stop) stop_player ;;
+stop) stop_job ;;
 *) echo "usage: omarchy-tts {read|toggle-pause|stop}" >&2; exit 2 ;;
 esac
