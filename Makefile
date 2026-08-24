@@ -25,7 +25,6 @@ install:
 	install -Dm755 libexec/omarchy-t2-mic-guard "$(PACKAGE_LIB)/mic-guard"
 	install -Dm644 systemd/omarchy-t2-battery-limit.service "$(DESTDIR)$(PREFIX)/lib/systemd/system/omarchy-t2-battery-limit.service"
 	install -Dm644 systemd/omarchy-t2-mic-guard.service "$(DESTDIR)$(PREFIX)/lib/systemd/user/omarchy-t2-mic-guard.service"
-	install -Dm644 rules/30-omarchy-t2-amdgpu-pm.rules "$(PACKAGE_SHARE)/rules/30-omarchy-t2-amdgpu-pm.rules"
 	install -Dm644 rules/90-omarchy-t2-battery.rules "$(PACKAGE_SHARE)/rules/90-omarchy-t2-battery.rules"
 	install -Dm644 rules/99-omarchy-apple-t2-touchpad.rules "$(PACKAGE_SHARE)/rules/99-omarchy-apple-t2-touchpad.rules"
 	install -Dm644 config/omarchy-t2.conf "$(DESTDIR)$(SYSCONFDIR)/omarchy-t2.conf"
@@ -36,7 +35,10 @@ install:
 	install -Dm644 config/t2fand-quiet.conf "$(PACKAGE_SHARE)/fan/t2fand-quiet.conf"
 	install -Dm644 config/10-omarchy-t2-mic.conf "$(PACKAGE_SHARE)/audio/10-omarchy-t2-mic.conf"
 	install -Dm644 config/bluetooth-a2dp-autoconnect.conf "$(PACKAGE_SHARE)/wireplumber/bluetooth-a2dp-autoconnect.conf"
-	install -Dm644 config/20-omarchy-t2-gpu "$(PACKAGE_SHARE)/uwsm/20-omarchy-t2-gpu"
+	# Preserve legacy link targets without carrying a second copy of Omarchy's GPU policies.
+	install -d "$(PACKAGE_SHARE)/rules" "$(PACKAGE_SHARE)/uwsm"
+	ln -sfn /usr/share/omarchy/default/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules "$(PACKAGE_SHARE)/rules/30-omarchy-t2-amdgpu-pm.rules"
+	ln -sfn /usr/share/omarchy/default/uwsm/env-hyprland.d/20-omarchy-t2-gpu "$(PACKAGE_SHARE)/uwsm/20-omarchy-t2-gpu"
 	install -Dm644 "$(DSP_SOURCE)/config/10-t2_161_speakers.conf" "$(PACKAGE_SHARE)/audio/10-omarchy-t2-speakers.conf"
 	patch --quiet "$(PACKAGE_SHARE)/audio/10-omarchy-t2-speakers.conf" patches/speakers-pipewire-1.6.patch
 	install -d "$(DESTDIR)$(PREFIX)/share/pipewire/devices/apple"

@@ -32,7 +32,7 @@ omarchy-t2 setup --dry-run
 - Protected six-channel speaker DSP for `MacBookPro16,1`
 - Normalized, limited mono microphone DSP using the working array channel
 - Bluetooth passkey display and A2DP auto-connect
-- Intel-first integrated graphics mode with the Radeon kept at low power
+- Compatibility helper for Omarchy's T2 GPU toggle
 - Optional Qwen3-TTS reading on the Radeon through Vulkan
 
 The speaker DSP initially sets the processed sink to 25%. Raise it cautiously.
@@ -53,9 +53,14 @@ omarchy-t2 input tap on
 omarchy-t2 audio speakers off
 omarchy-t2 audio mic on
 omarchy-t2 bluetooth disable
-omarchy-t2 gpu dedicated
+omarchy toggle hybrid gpu
 omarchy-t2 tts setup
 ```
+
+Graphics policy is implemented by Omarchy. The compatibility forms
+`omarchy-t2 gpu integrated` and `omarchy-t2 gpu dedicated` check the current
+GMUX state and delegate required changes to `omarchy toggle hybrid gpu`,
+including its confirmation and reboot flow.
 
 ## GPU text-to-speech
 
@@ -100,10 +105,11 @@ Apple firmware, ALSA UCM profiles, and `t2fanrd`.
 
 ## Upstream work and attribution
 
-The hardened touchpad classification and Intel-first graphics behavior are
-derived from Amin Marashi's Omarchy contributions
-[#6928](https://github.com/basecamp/omarchy/pull/6928) and
-[#6929](https://github.com/basecamp/omarchy/pull/6929).
+The hardened touchpad classification is derived from Amin Marashi's Omarchy
+contribution [#6928](https://github.com/basecamp/omarchy/pull/6928). Graphics
+mode is owned by Omarchy's
+[#6929](https://github.com/basecamp/omarchy/pull/6929); this package only keeps
+a compatibility helper for that command.
 
 Speaker filters and FIRs come from the MIT-licensed
 [`lemmyg/t2-apple-audio-dsp`](https://github.com/lemmyg/t2-apple-audio-dsp)

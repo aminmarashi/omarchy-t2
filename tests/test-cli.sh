@@ -35,6 +35,10 @@ assert_not_exists() {
   [[ ! -e $1 && ! -L $1 ]] || fail "unexpected path: $1"
 }
 
+assert_link_target() {
+  [[ -L $1 && $(readlink "$1") == "$2" ]] || fail "$1 does not link to: $2"
+}
+
 install -d "$dsp/config" "$dsp/firs" "$root/sys/devices/virtual/dmi/id" \
   "$root/sys/devices/platform/APP0001:00" "$root/etc/udev/rules.d" \
   "$root/etc/pipewire/pipewire.conf.d" "$root/etc/modprobe.d" \
@@ -74,6 +78,13 @@ make -s -C "$project_dir" \
   GGML_LICENSE="$dsp/LICENSE" \
   install
 
+assert_link_target \
+  "$root/usr/share/omarchy-t2/rules/30-omarchy-t2-amdgpu-pm.rules" \
+  /usr/share/omarchy/default/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules
+assert_link_target \
+  "$root/usr/share/omarchy-t2/uwsm/20-omarchy-t2-gpu" \
+  /usr/share/omarchy/default/uwsm/env-hyprland.d/20-omarchy-t2-gpu
+
 printf 'MacBookPro16,1\n' >"$root/sys/devices/virtual/dmi/id/product_name"
 printf '100\n' >"$root/sys/devices/platform/APP0001:00/battery_charge_limit"
 printf 'old fan config\n' >"$root/etc/t2fand.conf"
@@ -92,6 +103,16 @@ export XDG_RUNTIME_DIR="$test_dir/runtime"
 export OMARCHY_T2_ROOT="$root"
 export OMARCHY_T2_SKIP_RUNTIME=true
 install -d "$XDG_RUNTIME_DIR"
+
+stub_bin="$test_dir/bin"
+install -d "$stub_bin"
+cat >"$stub_bin/omarchy" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$OMARCHY_CALLS"
+EOF
+chmod 0755 "$stub_bin/omarchy"
+export OMARCHY_CALLS="$test_dir/omarchy-calls"
+export PATH="$stub_bin:$PATH"
 
 printf 'talker fixture\n' >"$test_dir/$TTS_TALKER"
 printf 'codec fixture\n' >"$test_dir/$TTS_CODEC"
@@ -118,8 +139,8 @@ assert_file_contains "$root/usr/bin/omarchy-tts" '"Generating speech…"'
 assert_not_exists "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
 assert_file_contains "$root/etc/omarchy-t2.conf" 'BATTERY_LIMIT=95'
 assert_file_contains "$root/etc/t2fand.conf" 'low_temp=40'
-assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=y'
-assert_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
+assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
+assert_not_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
 assert_exists "$root/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
 assert_file_contains "$home/.config/hypr/hyprland.lua" '-- omarchy-t2:start'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'kb_variant = "mac-iso"'
@@ -158,17 +179,30 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if true then'
 "$cli" battery limit 80
 "$cli" fan profile quiet
 "$cli" input tap on
+"$cli" gpu status | grep -q '^dedicated$'
 "$cli" gpu dedicated
+assert_not_exists "$OMARCHY_CALLS"
+"$cli" gpu integrated
+grep -Fxq 'toggle hybrid gpu' "$OMARCHY_CALLS" || fail "GPU helper does not delegate to Omarchy"
+printf 'options apple-gmux force_igd=y\n' >"$root/etc/modprobe.d/apple-gmux.conf"
+"$cli" gpu status | grep -q '^integrated$'
+"$cli" gpu dedicated
+"$cli" gpu toggle
+[[ $(wc -l <"$OMARCHY_CALLS") == 3 ]] || fail "GPU helper delegates each requested change exactly once"
 assert_file_contains "$root/etc/omarchy-t2.conf" 'BATTERY_LIMIT=80'
 assert_file_contains "$root/etc/t2fand.conf" 'low_temp=55'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = true'
-assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
 assert_not_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
 
 "$cli" status | grep -q 'Model:          MacBookPro16,1'
+printf 'canonical Radeon policy\n' >"$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
+install -d "$home/.config/uwsm/env-hyprland.d"
+printf 'canonical renderer policy\n' >"$home/.config/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
 "$cli" restore --yes
 assert_file_contains "$root/etc/t2fand.conf" 'old fan config'
-assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
+assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=y'
+assert_file_contains "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules" 'canonical Radeon policy'
+assert_file_contains "$home/.config/uwsm/env-hyprland.d/20-omarchy-t2-gpu" 'canonical renderer policy'
 assert_file_contains "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules" 'old touchpad rule'
 assert_file_contains "$root/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf" 'old speaker config'
 assert_file_contains "$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" 'old mic config'

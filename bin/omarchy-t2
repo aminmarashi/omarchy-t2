@@ -39,7 +39,7 @@ Usage:
   omarchy-t2 input [status | keyboard <layout> [variant] | tap <on|off>]
   omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]
   omarchy-t2 bluetooth [status | enable | disable]
-  omarchy-t2 gpu [status | integrated | dedicated]
+  omarchy-t2 gpu [status | toggle | integrated | dedicated]
   omarchy-t2 tts [status | setup [--yes] [--dry-run] | enable | disable | remove [--yes]]
   omarchy-t2 restore [--yes]
   omarchy-t2 version
@@ -234,7 +234,6 @@ write_setting() {
 load_system_config() {
   BATTERY_LIMIT=95
   FAN_PROFILE=cool
-  GPU_MODE=integrated
   if [[ -r $SYSTEM_CONFIG ]]; then
     # shellcheck source=/dev/null
     source "$SYSTEM_CONFIG"
@@ -584,40 +583,6 @@ bluetooth_disable() {
   user_systemctl restart bt-agent.service
 }
 
-rebuild_boot() {
-  runtime || return 0
-  if command -v limine-mkinitcpio >/dev/null 2>&1; then
-    sudo limine-mkinitcpio
-  else
-    sudo mkinitcpio -P
-  fi
-}
-
-gpu_mode() {
-  local mode=$1
-  local gmux="$ROOT/etc/modprobe.d/apple-gmux.conf"
-  local dpm="$ROOT/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
-  local renderer="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
-
-  case $mode in
-  integrated)
-    printf 'options apple-gmux force_igd=y\n' | install_root_text "$gmux" 0644
-    replace_system_link "$SHARE_DIR/rules/30-omarchy-t2-amdgpu-pm.rules" "$dpm"
-    replace_user_link "$SHARE_DIR/uwsm/20-omarchy-t2-gpu" "$renderer"
-    ;;
-  dedicated)
-    printf 'options apple-gmux force_igd=n\n' | install_root_text "$gmux" 0644
-    restore_system_file "$dpm"
-    restore_user_file "$renderer"
-    ;;
-  *) die "GPU mode must be integrated or dedicated" ;;
-  esac
-
-  write_setting "$SYSTEM_CONFIG" GPU_MODE "$mode" root
-  rebuild_boot
-  note "GPU mode: $mode (reboot required)"
-}
-
 reset_to_package_defaults() {
   run_root install -Dm0644 "$SHARE_DIR/defaults/omarchy-t2.conf" "$SYSTEM_CONFIG"
   install -Dm0644 "$SHARE_DIR/defaults/input.conf" "$USER_CONFIG"
@@ -645,7 +610,6 @@ Omarchy T2 will configure $SUPPORTED_MODEL with:
   • Mac ISO keyboard layout with tap-to-click disabled
   • protected six-speaker DSP and normalized microphone DSP
   • Bluetooth passkey display and A2DP auto-connect
-  • Intel-first integrated graphics mode
 
 Existing files are backed up under:
   $SYSTEM_STATE
@@ -673,9 +637,8 @@ EOF
   bluetooth_enable
   restart_audio
   audio_defaults
-  gpu_mode "$GPU_MODE"
 
-  note "Setup complete. Reboot to activate the graphics selection."
+  note "Setup complete."
 }
 
 cmd_status() {
@@ -689,7 +652,6 @@ cmd_status() {
 Model:          $(model_name)
 Battery limit:  $BATTERY_LIMIT% (hardware: $actual_battery)
 Fan profile:    $FAN_PROFILE
-GPU mode:       $GPU_MODE
 Keyboard:       $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+/$KEYBOARD_VARIANT}
 Tap-to-click:   $TAP_TO_CLICK
 Text-to-speech: $([[ $TTS_ENABLED == true ]] && echo enabled || echo disabled) (models: $(tts_models_ready && echo ready || echo missing))
@@ -762,10 +724,7 @@ cmd_restore() {
   restore_system_file "$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules"
   restore_system_file "$ROOT/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
   restore_system_file "$ROOT/etc/udev/rules.d/90-omarchy-t2-battery.rules"
-  restore_system_file "$ROOT/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
   restore_system_file "$ROOT/etc/t2fand.conf"
-  restore_system_file "$ROOT/etc/modprobe.d/apple-gmux.conf"
-  restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
   restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/omarchy-t2.lua"
   if [[ -d $TTS_DATA_DIR ]]; then
     case $TTS_DATA_DIR in
@@ -858,11 +817,28 @@ cmd_bluetooth() {
 }
 
 cmd_gpu() {
+  local current
+  local requested=${1:-status}
+  local gmux="$ROOT/etc/modprobe.d/apple-gmux.conf"
+
   require_supported_model
-  case ${1:-status} in
-  status) load_system_config; echo "$GPU_MODE" ;;
-  integrated|dedicated) gpu_mode "$1" ;;
-  *) die "usage: omarchy-t2 gpu [status | integrated | dedicated]" ;;
+  if [[ -f $gmux ]] && grep -Eq '^[[:space:]]*options[[:space:]]+apple-gmux[[:space:]].*force_igd=(y|Y|1)([[:space:]]|$)' "$gmux"; then
+    current=integrated
+  else
+    current=dedicated
+  fi
+
+  case $requested in
+  status) echo "$current" ;;
+  toggle) exec omarchy toggle hybrid gpu ;;
+  integrated|dedicated)
+    if [[ $requested == "$current" ]]; then
+      note "GPU mode is already $current."
+    else
+      exec omarchy toggle hybrid gpu
+    fi
+    ;;
+  *) die "usage: omarchy-t2 gpu [status | toggle | integrated | dedicated]" ;;
   esac
 }
 
