@@ -33,6 +33,7 @@ omarchy-t2 setup --dry-run
 - Normalized, limited mono microphone DSP using the working array channel
 - Bluetooth passkey display and A2DP auto-connect
 - Intel-first integrated graphics mode with the Radeon kept at low power
+- Optional Qwen3-TTS reading on the Radeon through Vulkan
 
 The speaker DSP initially sets the processed sink to 25%. Raise it cautiously.
 Microphone selection remains automatic: external microphones take precedence
@@ -53,7 +54,30 @@ omarchy-t2 audio speakers off
 omarchy-t2 audio mic on
 omarchy-t2 bluetooth disable
 omarchy-t2 gpu dedicated
+omarchy-t2 tts setup
 ```
+
+## GPU text-to-speech
+
+Run the optional setup once to download and verify the Q4 models (about 1.4
+GB):
+
+```bash
+omarchy-t2 tts setup
+```
+
+Text-to-speech uses Qwen3-TTS 1.7B CustomVoice with the Vivian voice. Its
+delivery is friendly and calm, and pitch-preserving playback runs 25% faster
+than the generated pace. Audio streams as it is produced instead of waiting
+for the complete selection.
+
+- `ALT + R` reads the current primary selection from the beginning.
+- `ALT + E` pauses or resumes playback.
+
+The setup unbinds those keys before installing its bindings, stores models in
+`~/.local/share/omarchy-t2/tts`, and leaves the model files out of the package.
+Disable the bindings without deleting models with `omarchy-t2 tts disable`.
+Remove the downloaded models with `omarchy-t2 tts remove`.
 
 Inspect the machine with `omarchy-t2 status` and `omarchy-t2 doctor`. Restore
 the files that were present before setup with:
@@ -87,6 +111,11 @@ Speaker filters and FIRs come from the MIT-licensed
 and six-channel positions. The microphone chain is adapted from the same
 project's `mic` work.
 
+GPU text-to-speech uses the MIT-licensed
+[`qwentts.cpp`](https://github.com/ServeurpersoCom/qwentts.cpp) runtime and
+Apache-2.0 Qwen3-TTS GGUF weights published by
+[`Serveurperso/Qwen3-TTS-GGUF`](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF).
+
 ## Development
 
 Tests install into an isolated temporary root and never change the host:
@@ -99,7 +128,11 @@ To stage a complete package tree, pass a checkout of the speaker DSP branch:
 
 ```bash
 make DESTDIR=/tmp/omarchy-t2-stage \
-  DSP_SOURCE=/path/to/t2-apple-audio-dsp install
+  DSP_SOURCE=/path/to/t2-apple-audio-dsp \
+  QWEN_TTS_BINARY=/path/to/qwen-tts \
+  QWEN_TTS_LICENSE=/path/to/qwentts.cpp/LICENSE \
+  GGML_LICENSE=/path/to/qwentts.cpp/ggml/LICENSE \
+  install
 ```
 
 ## Author
