@@ -73,8 +73,11 @@ omarchy-t2 tts setup
 
 Text-to-speech uses Qwen3-TTS 1.7B CustomVoice with the Vivian voice. Its
 delivery is friendly and calm, and pitch-preserving playback runs 25% faster
-than the generated pace. The selection is rendered completely before playback
-so slower synthesis cannot create audible underrun gaps.
+than the generated pace. Long selections are cleaned of URLs and filename-like
+noise, split at sentence boundaries, and queued as complete waveforms. Playback
+starts when the first section is ready while the remaining sections render in
+the background, so articles and book chapters do not exceed Qwen's single-prompt
+limits or break into syllable-sized underruns.
 
 - `ALT + R` reads the current primary selection from the beginning.
 - `ALT + E` pauses or resumes playback.

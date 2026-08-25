@@ -9,10 +9,10 @@ runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-tts"
 job_pid_file="$runtime_dir/job.pid"
 pid_file="$runtime_dir/player.pid"
 generation_log="$runtime_dir/generation.log"
-source_audio="$runtime_dir/source.wav"
-playback_audio="$runtime_dir/speech.wav"
+queue_dir="$runtime_dir/queue"
 tts_data_dir="${OMARCHY_T2_TTS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-t2/tts}"
 synthesizer="${OMARCHY_T2_TTS_ENGINE:-/usr/lib/omarchy-t2/qwen-tts}"
+queue_helper="${OMARCHY_T2_TTS_QUEUE_HELPER:-/usr/lib/omarchy-t2/tts-queue}"
 model="$tts_data_dir/models/qwen-talker-1.7b-customvoice-Q4_K_M.gguf"
 codec="$tts_data_dir/models/qwen-tokenizer-12hz-Q4_K_M.gguf"
 
@@ -43,37 +43,58 @@ job_pid() {
   printf '%s\n' "$pid"
 }
 
-stop_job() {
-  local pid job attempt alive
+collect_process_tree() {
+  local root=$1 current
+  local -a pending=("$root") children
+
+  while ((${#pending[@]})); do
+    current=${pending[0]}
+    pending=("${pending[@]:1}")
+    [[ -e /proc/$current/status ]] || continue
+    children=()
+    read -ra children <"/proc/$current/task/$current/children" || true
+    pending+=("${children[@]}")
+    printf '%s\n' "$current"
+  done
+}
+
+terminate_process_tree() {
+  local root=$1 pid attempt alive
   local -a job_pids
 
-  if job=$(job_pid); then
-    read -ra job_pids <"/proc/$job/task/$job/children" || true
-    job_pids+=("$job")
-  elif pid=$(player_pid); then
-    job_pids=("$pid")
-  else
-    job_pids=()
-  fi
+  mapfile -t job_pids < <(collect_process_tree "$root")
+  ((${#job_pids[@]})) || return
+  kill -TERM "${job_pids[@]}" 2>/dev/null || true
+  kill -CONT "${job_pids[@]}" 2>/dev/null || true
 
-  : >"$job_pid_file"
-  : >"$pid_file"
-  if ((${#job_pids[@]})); then
-    kill -TERM "${job_pids[@]}" 2>/dev/null || true
-    kill -CONT "${job_pids[@]}" 2>/dev/null || true
-
-    for attempt in {1..20}; do
-      alive=0
-      for pid in "${job_pids[@]}"; do
-        kill -0 "$pid" 2>/dev/null && alive=1
-      done
-      ((alive == 0)) && break
-      sleep 0.05
+  for attempt in {1..20}; do
+    alive=0
+    for pid in "${job_pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && alive=1
     done
-    ((alive == 0)) || kill -KILL "${job_pids[@]}" 2>/dev/null || true
+    ((alive == 0)) && break
+    sleep 0.05
+  done
+  ((alive == 0)) || kill -KILL "${job_pids[@]}" 2>/dev/null || true
+}
+
+stop_job() {
+  local pid job
+
+  if job=$(job_pid); then
+    : >"$job_pid_file"
+    : >"$pid_file"
+    terminate_process_tree "$job"
+  elif pid=$(player_pid); then
+    : >"$pid_file"
+    terminate_process_tree "$pid"
+  else
+    : >"$job_pid_file"
+    : >"$pid_file"
   fi
 
-  rm -f "$source_audio" "$playback_audio"
+  rm -rf -- "$queue_dir"
+  rm -f "$runtime_dir/source.wav" "$runtime_dir/speech.wav"
 }
 
 finish_job() {
@@ -83,7 +104,7 @@ finish_job() {
   if [[ $current_job == "$job" ]]; then
     : >"$job_pid_file"
     : >"$pid_file"
-    rm -f "$source_audio" "$playback_audio"
+    rm -rf -- "$queue_dir"
     [[ -z $error ]] || notify-send -u critical "Read selected text" "$error"
   fi
 }
@@ -93,48 +114,105 @@ require_tts() {
     notify-send -u critical "Read selected text" "Run 'omarchy-t2 tts setup' first"
     exit 1
   fi
+  if [[ ! -x $queue_helper ]]; then
+    notify-send -u critical "Read selected text" "The TTS queue helper is not installed"
+    exit 1
+  fi
 }
 
 render_and_play() {
-  local text=$1 job=$BASHPID player status
+  local text=$1 job=$BASHPID producer player status index total
+  local chunks_file complete_file failed_file source_audio playback_audio
 
   printf '%s\n' "$job" >"$job_pid_file"
+  rm -rf -- "$queue_dir"
+  mkdir -p "$queue_dir"
+  chunks_file="$queue_dir/chunks.txt"
+  complete_file="$queue_dir/complete"
+  failed_file="$queue_dir/failed"
 
-  if ! printf '%s' "$text" 9>&- | "$synthesizer" \
-    --model "$model" \
-    --codec "$codec" \
-    --speaker vivian \
-    --lang English \
-    --instruct "Speak as a friendly young adult woman with clear natural articulation, gentle positive energy, subtle expression, and an even conversational delivery. Sound engaged but calm, never overly enthusiastic." \
-    --seed 42 \
-    -o "$source_audio" >"$generation_log" 2>&1 9>&-; then
-    finish_job "$job" "Speech generation failed"
+  if ! printf '%s' "$text" | "$queue_helper" split >"$chunks_file" 2>"$generation_log"; then
+    finish_job "$job" "Text preparation failed"
+    return
+  fi
+  total=$(wc -l <"$chunks_file")
+  if ((total == 0)); then
+    finish_job "$job" "No readable text remained after removing links and filenames"
     return
   fi
 
-  if ! ffmpeg -y -hide_banner -loglevel error -i "$source_audio" -filter:a atempo=1.25 \
-    -c:a pcm_s16le -ar 24000 -ac 1 "$playback_audio" 2>>"$generation_log" 9>&-; then
-    finish_job "$job" "Speech processing failed"
+  notify-send -u low -t 2000 "Read selected text" "Preparing $total speech sections…"
+
+  if "$synthesizer" \
+      --model "$model" \
+      --codec "$codec" \
+      --speaker vivian \
+      --lang English \
+      --instruct "Speak as a friendly young adult woman with clear natural articulation, gentle positive energy, subtle expression, and an even conversational delivery. Sound engaged but calm, never overly enthusiastic." \
+      --seed 42 \
+      --stream-by-line \
+      -o - <"$chunks_file" 2>>"$generation_log" 9>&- |
+      "$queue_helper" unpack "$queue_dir" 2>>"$generation_log" 9>&-; then
+    : >"$complete_file"
+  else
+    : >"$failed_file"
+  fi &
+  producer=$!
+
+  for ((index = 1; index <= total; index++)); do
+    printf -v source_audio '%s/%06d.wav' "$queue_dir" "$index"
+    printf -v playback_audio '%s/%06d-play.wav' "$queue_dir" "$index"
+    while [[ ! -f $source_audio ]]; do
+      if [[ -f $failed_file ]]; then
+        wait "$producer" || true
+        finish_job "$job" "Speech generation failed at section $index of $total"
+        return
+      fi
+      if ! kill -0 "$producer" 2>/dev/null; then
+        if [[ -f $complete_file ]]; then
+          finish_job "$job" "Speech generation ended before section $index of $total"
+        else
+          finish_job "$job" "Speech generation stopped at section $index of $total"
+        fi
+        return
+      fi
+      sleep 0.05
+    done
+
+    if ! ffmpeg -y -hide_banner -loglevel error -i "$source_audio" -filter:a atempo=1.25 \
+      -c:a pcm_s16le -ar 24000 -ac 1 "$playback_audio" 2>>"$generation_log" 9>&-; then
+      terminate_process_tree "$producer"
+      finish_job "$job" "Speech processing failed at section $index of $total"
+      return
+    fi
+    rm -f "$source_audio"
+
+    if ((index == 1)); then
+      notify-send -u low -t 2000 "Read selected text" "Playing $total speech sections"
+    fi
+    pw-play "$playback_audio" >/dev/null 2>&1 9>&- &
+    player=$!
+    printf '%s\n' "$player" >"$pid_file"
+    if wait "$player"; then
+      status=0
+    else
+      status=$?
+    fi
+    : >"$pid_file"
+    rm -f "$playback_audio"
+
+    if ((status != 0)); then
+      terminate_process_tree "$producer"
+      finish_job "$job" "Speech playback failed at section $index of $total"
+      return
+    fi
+  done
+
+  if ! wait "$producer" || [[ ! -f $complete_file ]]; then
+    finish_job "$job" "Speech generation did not finish cleanly"
     return
   fi
-
-  rm -f "$source_audio"
-  notify-send -u low -t 1500 "Read selected text" "Playing"
-  pw-play "$playback_audio" >/dev/null 2>&1 9>&- &
-  player=$!
-  printf '%s\n' "$player" >"$pid_file"
-
-  if wait "$player"; then
-    status=0
-  else
-    status=$?
-  fi
-
-  if ((status == 0)); then
-    finish_job "$job"
-  else
-    finish_job "$job" "Speech playback failed"
-  fi
+  finish_job "$job"
 }
 
 read_selection() {
@@ -153,7 +231,7 @@ read_selection() {
     exit 1
   fi
 
-  notify-send -u low -t 2000 "Read selected text" "Generating speech…"
+  notify-send -u low -t 2000 "Read selected text" "Preparing speech…"
   render_and_play "$text" &
   printf '%s\n' "$!" >"$job_pid_file"
 }

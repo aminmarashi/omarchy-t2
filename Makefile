@@ -19,6 +19,7 @@ install:
 	@test -f "$(GGML_LICENSE)" || { echo "GGML_LICENSE must point to ggml's license" >&2; exit 1; }
 	install -Dm755 bin/omarchy-t2 "$(DESTDIR)$(PREFIX)/bin/omarchy-t2"
 	install -Dm755 libexec/omarchy-tts "$(DESTDIR)$(PREFIX)/bin/omarchy-tts"
+	install -Dm755 libexec/omarchy-tts-queue.py "$(PACKAGE_LIB)/tts-queue"
 	install -Dm755 "$(QWEN_TTS_BINARY)" "$(PACKAGE_LIB)/qwen-tts"
 	install -Dm755 libexec/omarchy-t2-apply-battery-limit "$(PACKAGE_LIB)/apply-battery-limit"
 	install -Dm755 libexec/omarchy-t2-bluetooth-agent "$(PACKAGE_LIB)/bluetooth-agent"
@@ -52,4 +53,5 @@ install:
 	install -Dm644 README.md "$(DESTDIR)$(PREFIX)/share/doc/omarchy-t2/README.md"
 
 test:
+	python3 tests/test-tts-queue.py
 	bash tests/test-cli.sh

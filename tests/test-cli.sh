@@ -134,8 +134,11 @@ assert_not_exists "$home/.config/hypr/omarchy-t2.lua"
 assert_exists "$root/etc/udev/rules.d/99-omarchy-t2-touchpad.rules"
 assert_file_contains "$root/usr/bin/omarchy-tts" 'qwen-talker-1.7b-customvoice-Q4_K_M.gguf'
 assert_file_contains "$root/usr/bin/omarchy-tts" 'kill -CONT "${job_pids[@]}"'
+assert_exists "$root/usr/lib/omarchy-t2/tts-queue"
+assert_file_contains "$root/usr/bin/omarchy-tts" '--stream-by-line'
+assert_file_contains "$root/usr/bin/omarchy-tts" 'Preparing $total speech sections'
 assert_file_contains "$root/usr/bin/omarchy-tts" 'pw-play "$playback_audio"'
-assert_file_contains "$root/usr/bin/omarchy-tts" '"Generating speech…"'
+assert_file_contains "$root/usr/bin/omarchy-tts" '"Preparing speech…"'
 assert_not_exists "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
 assert_file_contains "$root/etc/omarchy-t2.conf" 'BATTERY_LIMIT=95'
 assert_file_contains "$root/etc/t2fand.conf" 'low_temp=40'
