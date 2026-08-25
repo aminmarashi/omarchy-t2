@@ -2,7 +2,7 @@
 
 pkgname=omarchy-t2
 pkgver=0.2.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Omarchy hardware support, tuning, and Vulkan TTS for Intel T2 MacBook Pros"
 arch=('x86_64')
 url="https://github.com/aminmarashi/omarchy-t2"
@@ -54,7 +54,7 @@ options=('!lto')
 backup=('etc/omarchy-t2.conf')
 install=omarchy-t2.install
 
-_source_commit=fe75c2dd1a12d807424e222a9a7a865066e80f46
+_source_commit=0ff3a3241ea5fd6c4572ba91b50d24848065473a
 _qwentts_commit=a8a7716b530e49fed537c57711247c12fbbb903c
 _ggml_commit=c044c6f03892f9d5e98213b05f8afea1f8b0d3c9
 _dsp_commit=8d3edcbfcf17649279927fb12130b8575e912d2e
