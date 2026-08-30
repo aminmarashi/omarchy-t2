@@ -1,9 +1,9 @@
 # Maintainer: Amin Marashi <me@amin.codes>
 
 pkgname=omarchy-t2
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
-pkgdesc="Omarchy hardware support, tuning, and Vulkan TTS for Intel T2 MacBook Pros"
+pkgdesc="Omarchy hardware support, React DRM Touch Bar setup, tuning, and Vulkan TTS for Intel T2 MacBook Pros"
 arch=('x86_64')
 url="https://github.com/aminmarashi/omarchy-t2"
 license=('MIT')
@@ -19,6 +19,7 @@ depends=(
   'findutils'
   'gawk'
   'glib2'
+  'git'
   'grep'
   'iw'
   'libpulse'
@@ -45,7 +46,6 @@ depends=(
 )
 makedepends=(
   'cmake'
-  'git'
   'ninja'
   'patch'
   'shaderc'
@@ -56,7 +56,7 @@ options=('!lto')
 backup=('etc/omarchy-t2.conf')
 install=omarchy-t2.install
 
-_source_commit=a8bc328f49866f32ce3f57637257afc84e280146
+_source_commit=0ada4cc33889f39c52dde090409b940ce3b9b45d
 _qwentts_commit=a8a7716b530e49fed537c57711247c12fbbb903c
 _ggml_commit=c044c6f03892f9d5e98213b05f8afea1f8b0d3c9
 _dsp_commit=8d3edcbfcf17649279927fb12130b8575e912d2e
