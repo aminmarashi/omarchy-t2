@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-VERSION=0.3.0
+VERSION=0.4.0
 SUPPORTED_MODEL=MacBookPro16,1
 
 ROOT=${OMARCHY_T2_ROOT:-}
@@ -26,6 +26,8 @@ TTS_TALKER_URL=${OMARCHY_T2_TTS_TALKER_URL:-https://huggingface.co/Serveurperso/
 TTS_CODEC_URL=${OMARCHY_T2_TTS_CODEC_URL:-https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main/$TTS_CODEC}
 TTS_TALKER_SHA256=${OMARCHY_T2_TTS_TALKER_SHA256:-cc328834a631bc08bf9f43e62fa23f8a1383d9b429864ce6690cfb172077fc4a}
 TTS_CODEC_SHA256=${OMARCHY_T2_TTS_CODEC_SHA256:-cf3788b4d50aaa665fb6e57c170396aae03a3555fea52d2b5d0cda902d658039}
+TOUCHBAR_REPO_URL=https://github.com/aminmarashi/react-drm-for-touchbar.git
+TOUCHBAR_DIR=${OMARCHY_T2_TOUCHBAR_DIR:-$HOME/react-drm}
 
 usage() {
   cat <<'EOF'
@@ -46,6 +48,7 @@ Usage:
   omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]
   omarchy-t2 bluetooth [status | enable | disable]
   omarchy-t2 gpu [status | toggle | integrated | dedicated]
+  omarchy-t2 touchbar [status | analyze | setup | update | enable | disable | uninstall]
   omarchy-t2 tts [status | setup [--yes] [--dry-run] | enable | disable | remove [--yes]]
   omarchy-t2 restore [--yes]
   omarchy-t2 version
@@ -625,6 +628,124 @@ tts_remove() {
   note "Removed downloaded TTS models."
 }
 
+touchbar_checkout_ready() {
+  git -C "$TOUCHBAR_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+    [[ -x $TOUCHBAR_DIR/install.sh && -x $TOUCHBAR_DIR/uninstall.sh ]]
+}
+
+touchbar_fork_remote() {
+  local remote url
+  while IFS= read -r remote; do
+    url=$(git -C "$TOUCHBAR_DIR" remote get-url "$remote" 2>/dev/null || true)
+    case ${url%.git} in
+    https://github.com/aminmarashi/react-drm-for-touchbar|git@*:aminmarashi/react-drm-for-touchbar|ssh://git@github.com/aminmarashi/react-drm-for-touchbar)
+      echo "$remote"
+      return 0
+      ;;
+    esac
+  done < <(git -C "$TOUCHBAR_DIR" remote 2>/dev/null)
+  return 1
+}
+
+touchbar_require_checkout() {
+  touchbar_checkout_ready || die "react-drm checkout is missing or incomplete: $TOUCHBAR_DIR"
+  touchbar_fork_remote >/dev/null || die "react-drm checkout is not connected to the AminMarashi fork: $TOUCHBAR_DIR"
+}
+
+touchbar_service_state() {
+  if ! runtime; then
+    echo unavailable
+  elif systemctl --user is-active --quiet react-drm.service; then
+    echo active
+  elif systemctl --user is-enabled --quiet react-drm.service; then
+    echo enabled
+  else
+    echo inactive
+  fi
+}
+
+touchbar_source_state() {
+  if ! touchbar_checkout_ready; then
+    echo missing
+  elif touchbar_fork_remote >/dev/null; then
+    echo ready
+  else
+    echo wrong-remote
+  fi
+}
+
+touchbar_status() {
+  local revision=missing
+  if touchbar_checkout_ready; then
+    revision=$(git -C "$TOUCHBAR_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+  fi
+  printf 'source=%s path=%s revision=%s service=%s\n' \
+    "$(touchbar_source_state)" "$TOUCHBAR_DIR" "$revision" "$(touchbar_service_state)"
+}
+
+touchbar_clone() {
+  if [[ -e $TOUCHBAR_DIR ]]; then
+    touchbar_require_checkout
+    return
+  fi
+  command -v git >/dev/null 2>&1 || die "git is required to clone react-drm"
+  install -d -m0755 "$(dirname "$TOUCHBAR_DIR")"
+  note "Cloning the AminMarashi react-drm fork into $TOUCHBAR_DIR"
+  git clone --origin fork "$TOUCHBAR_REPO_URL" "$TOUCHBAR_DIR"
+  touchbar_require_checkout
+}
+
+touchbar_analyze() {
+  touchbar_require_checkout
+  (cd "$TOUCHBAR_DIR" && ./install.sh analyze)
+}
+
+touchbar_setup() {
+  touchbar_clone
+  cat <<EOF
+react-drm's installer will now analyze this machine before making changes.
+It separately confirms removal of any conflicting Touch Bar daemon, installs
+its Arch dependencies, preserves your editable config.ts, and deploys its
+udev rule and user service from:
+  $TOUCHBAR_DIR
+EOF
+  (cd "$TOUCHBAR_DIR" && ./install.sh)
+}
+
+touchbar_update() {
+  local branch remote
+  touchbar_require_checkout
+  if ! git -C "$TOUCHBAR_DIR" diff --quiet || ! git -C "$TOUCHBAR_DIR" diff --cached --quiet; then
+    die "react-drm has tracked local changes; commit or stash them before updating"
+  fi
+  branch=$(git -C "$TOUCHBAR_DIR" branch --show-current)
+  [[ $branch == master ]] || die "switch the react-drm checkout to its master branch before updating"
+  remote=$(touchbar_fork_remote)
+  git -C "$TOUCHBAR_DIR" pull --ff-only "$remote" master
+  touchbar_setup
+}
+
+touchbar_enable() {
+  touchbar_require_checkout
+  [[ -f $TOUCHBAR_DIR/linux-touchbar-control-center/dist/index.js ]] ||
+    die "react-drm is not built; run 'omarchy-t2 touchbar setup'"
+  [[ -f ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/react-drm.service ]] ||
+    die "react-drm user service is not installed; run 'omarchy-t2 touchbar setup'"
+  user_systemctl daemon-reload
+  user_systemctl enable --now react-drm.service
+  note "react-drm Touch Bar enabled."
+}
+
+touchbar_disable() {
+  user_systemctl disable --now react-drm.service
+  note "react-drm Touch Bar disabled."
+}
+
+touchbar_uninstall() {
+  touchbar_require_checkout
+  (cd "$TOUCHBAR_DIR" && ./uninstall.sh)
+}
+
 audio_speakers_enable() {
   local local_bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
   local legacy="$ROOT/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf"
@@ -791,6 +912,9 @@ EOF
   audio_defaults
 
   note "Setup complete."
+  if [[ $(touchbar_source_state) != ready ]]; then
+    note "Optional: run 'omarchy-t2 touchbar setup' for the React DRM Touch Bar."
+  fi
 }
 
 cmd_status() {
@@ -808,6 +932,7 @@ Power policy:   $([[ $POWER_ENABLED == true ]] && echo enabled || echo disabled)
 Keyboard:       $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+/$KEYBOARD_VARIANT}
 Tap-to-click:   $TAP_TO_CLICK
 Text-to-speech: $([[ $TTS_ENABLED == true ]] && echo enabled || echo disabled) (models: $(tts_models_ready && echo ready || echo missing))
+Touch Bar UI:   $(touchbar_service_state) (source: $(touchbar_source_state))
 Speaker DSP:    $([[ -e $ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf ]] && echo enabled || echo disabled)
 Microphone DSP: $([[ -e ${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf ]] && echo enabled || echo disabled)
 EOF
@@ -1057,6 +1182,20 @@ cmd_tts() {
   esac
 }
 
+cmd_touchbar() {
+  require_supported_model
+  case ${1:-status} in
+  status) [[ $# == 0 || $# == 1 ]] || die "usage: omarchy-t2 touchbar status"; touchbar_status ;;
+  analyze) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar analyze"; touchbar_analyze ;;
+  setup) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar setup"; touchbar_setup ;;
+  update) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar update"; touchbar_update ;;
+  enable) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar enable"; touchbar_enable ;;
+  disable) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar disable"; touchbar_disable ;;
+  uninstall) [[ $# == 1 ]] || die "usage: omarchy-t2 touchbar uninstall"; touchbar_uninstall ;;
+  *) die "usage: omarchy-t2 touchbar [status | analyze | setup | update | enable | disable | uninstall]" ;;
+  esac
+}
+
 command=${1:-help}
 shift || true
 if [[ $EUID == 0 && -z $ROOT ]]; then
@@ -1076,6 +1215,7 @@ input) cmd_input "$@" ;;
 audio) cmd_audio "$@" ;;
 bluetooth) cmd_bluetooth "$@" ;;
 gpu) cmd_gpu "$@" ;;
+touchbar) cmd_touchbar "$@" ;;
 tts) cmd_tts "$@" ;;
 restore) cmd_restore "$@" ;;
 version|--version|-v) echo "omarchy-t2 $VERSION" ;;

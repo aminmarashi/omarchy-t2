@@ -8,6 +8,7 @@ root="$test_dir/root"
 home="$test_dir/home"
 dsp="$test_dir/dsp"
 qwen_tts="$test_dir/qwen-tts"
+touchbar="$home/react-drm"
 TTS_TALKER=qwen-talker-1.7b-customvoice-Q4_K_M.gguf
 TTS_CODEC=qwen-tokenizer-12hz-Q4_K_M.gguf
 
@@ -44,6 +45,22 @@ install -d "$dsp/config" "$dsp/firs" "$root/sys/devices/virtual/dmi/id" \
   "$root/etc/pipewire/pipewire.conf.d" "$root/etc/modprobe.d" \
   "$home/.config/hypr" "$home/.config/systemd/user/bt-agent.service.d" \
   "$home/.config/pipewire/pipewire.conf.d"
+
+install -d "$touchbar/linux-touchbar-control-center/dist"
+cat >"$touchbar/install.sh" <<'EOF'
+#!/bin/bash
+printf 'install %s\n' "$*" >>"$TOUCHBAR_CALLS"
+EOF
+cat >"$touchbar/uninstall.sh" <<'EOF'
+#!/bin/bash
+printf 'uninstall %s\n' "$*" >>"$TOUCHBAR_CALLS"
+EOF
+chmod 0755 "$touchbar/install.sh" "$touchbar/uninstall.sh"
+: >"$touchbar/linux-touchbar-control-center/dist/index.js"
+git -C "$touchbar" init -q
+git -C "$touchbar" remote add fork https://github.com/aminmarashi/react-drm-for-touchbar.git
+git -C "$touchbar" add install.sh uninstall.sh linux-touchbar-control-center/dist/index.js
+git -C "$touchbar" -c user.name=Test -c user.email=test@example.com commit -qm fixture
 
 cat >"$dsp/config/10-t2_161_speakers.conf" <<'EOF'
 context.modules = [
@@ -94,6 +111,7 @@ printf 'old speaker config\n' >"$root/etc/pipewire/pipewire.conf.d/10-t2_161_spe
 printf 'require("default.hypr.omarchy")\nrequire("hypr.input")\n' >"$home/.config/hypr/hyprland.lua"
 printf 'old mic config\n' >"$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf"
 printf '[Service]\nExecStart=/old-agent\n' >"$home/.config/systemd/user/bt-agent.service.d/upstream-fix.conf"
+printf '[Service]\nExecStart=/usr/bin/true\n' >"$home/.config/systemd/user/react-drm.service"
 
 export HOME="$home"
 export XDG_CONFIG_HOME="$home/.config"
@@ -102,6 +120,8 @@ export XDG_STATE_HOME="$home/.local/state"
 export XDG_RUNTIME_DIR="$test_dir/runtime"
 export OMARCHY_T2_ROOT="$root"
 export OMARCHY_T2_SKIP_RUNTIME=true
+export OMARCHY_T2_TOUCHBAR_DIR="$touchbar"
+export TOUCHBAR_CALLS="$test_dir/touchbar-calls"
 install -d "$XDG_RUNTIME_DIR"
 
 stub_bin="$test_dir/bin"
@@ -124,7 +144,7 @@ export OMARCHY_T2_TTS_CODEC_SHA256
 OMARCHY_T2_TTS_CODEC_SHA256=$(sha256sum "$test_dir/$TTS_CODEC" | awk '{print $1}')
 
 cli="$root/usr/bin/omarchy-t2"
-"$cli" version | grep -q '^omarchy-t2 0.3.0$'
+"$cli" version | grep -q '^omarchy-t2 0.4.0$'
 "$cli" setup --dry-run
 assert_file_contains "$root/etc/t2fand.conf" 'old fan config'
 assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
@@ -199,6 +219,16 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if false then'
 assert_file_contains "$home/.config/omarchy-t2/config" 'TTS_ENABLED=true'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if true then'
 
+"$cli" touchbar status | grep -q '^source=ready .* service=unavailable$'
+"$cli" touchbar analyze
+"$cli" touchbar setup
+"$cli" touchbar enable
+"$cli" touchbar disable
+"$cli" touchbar uninstall
+assert_file_contains "$TOUCHBAR_CALLS" 'install analyze'
+assert_file_contains "$TOUCHBAR_CALLS" 'install '
+assert_file_contains "$TOUCHBAR_CALLS" 'uninstall '
+
 "$cli" battery limit 80
 "$cli" fan profile quiet
 "$cli" power thermal on 50 70 20 45
@@ -240,6 +270,7 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = true'
 assert_not_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
 
 "$cli" status | grep -q 'Model:          MacBookPro16,1'
+"$cli" status | grep -q 'Touch Bar UI:   unavailable (source: ready)'
 printf 'canonical Radeon policy\n' >"$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
 install -d "$home/.config/uwsm/env-hyprland.d"
 printf 'canonical renderer policy\n' >"$home/.config/uwsm/env-hyprland.d/20-omarchy-t2-gpu"

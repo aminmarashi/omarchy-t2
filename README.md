@@ -35,6 +35,7 @@ omarchy-t2 setup --dry-run
 - Normalized, limited mono microphone DSP using the working array channel
 - Bluetooth passkey display and A2DP auto-connect
 - Compatibility helper for Omarchy's T2 GPU toggle
+- Optional React DRM Touch Bar control center from the AminMarashi fork
 - Optional Qwen3-TTS reading on the Radeon through Vulkan
 
 The DSP input stays at 100%; a packaged PipeWire link-group resolver
@@ -63,8 +64,40 @@ omarchy-t2 audio speakers off
 omarchy-t2 audio mic on
 omarchy-t2 bluetooth disable
 omarchy toggle hybrid gpu
+omarchy-t2 touchbar setup
 omarchy-t2 tts setup
 ```
+
+## Touch Bar
+
+Install the React DRM Touch Bar control center from
+[`aminmarashi/react-drm-for-touchbar`](https://github.com/aminmarashi/react-drm-for-touchbar):
+
+```bash
+omarchy-t2 touchbar setup
+```
+
+The command reuses `~/react-drm` when it is already connected to the
+AminMarashi fork, or clones the fork there on first use. It then hands control
+to react-drm's own installer, which analyzes the machine before making changes
+and separately confirms removal of a conflicting `tiny-dfr` or
+`mac-touchbar-plus` installation. The checkout remains editable so the Touch
+Bar's `config.ts` and graphical config editor continue to work as designed.
+
+Inspect an existing checkout without making changes, update it with a
+fast-forward pull, or control the installed user service with:
+
+```bash
+omarchy-t2 touchbar analyze
+omarchy-t2 touchbar update
+omarchy-t2 touchbar status
+omarchy-t2 touchbar disable
+omarchy-t2 touchbar enable
+```
+
+`omarchy-t2 touchbar uninstall` runs react-drm's own uninstaller. It removes
+the service and udev integration but intentionally keeps the editable checkout,
+npm dependencies, installed system packages, and user group memberships.
 
 ## Power and cooling
 
@@ -152,6 +185,11 @@ contribution [#6928](https://github.com/basecamp/omarchy/pull/6928). Graphics
 mode is owned by Omarchy's
 [#6929](https://github.com/basecamp/omarchy/pull/6929); this package only keeps
 a compatibility helper for that command.
+
+The optional Touch Bar workflow installs Amin Marashi's GPL-3.0-or-later
+[`react-drm-for-touchbar`](https://github.com/aminmarashi/react-drm-for-touchbar)
+fork through its own analysis, build, and deployment scripts. Its source and
+runtime files remain outside the MIT-licensed `omarchy-t2` package.
 
 Speaker filters and FIRs come from the MIT-licensed
 [`lemmyg/t2-apple-audio-dsp`](https://github.com/lemmyg/t2-apple-audio-dsp)
