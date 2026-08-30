@@ -1,40 +1,61 @@
 pkgbase = omarchy-t2
-	pkgdesc = Omarchy hardware support and tuning for Intel T2 MacBook Pros
-	pkgver = 0.1.0
+	pkgdesc = Omarchy hardware support, tuning, and Vulkan TTS for Intel T2 MacBook Pros
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/aminmarashi/omarchy-t2
 	install = omarchy-t2.install
 	arch = x86_64
 	license = MIT
+	makedepends = cmake
+	makedepends = git
+	makedepends = ninja
 	makedepends = patch
+	makedepends = shaderc
+	makedepends = spirv-headers
+	makedepends = vulkan-headers
 	depends = apple-bcm-firmware
 	depends = apple-t2-audio-config
 	depends = bash
 	depends = bluez
 	depends = calf
 	depends = coreutils
+	depends = curl
+	depends = ffmpeg
 	depends = findutils
 	depends = gawk
 	depends = glib2
 	depends = grep
+	depends = iw
 	depends = libpulse
+	depends = libnotify
 	depends = linux-t2
 	depends = lsp-plugins-lv2
 	depends = omarchy>=4.0.0
 	depends = pipewire
+	depends = pipewire-audio
 	depends = pipewire-pulse
 	depends = python
 	depends = python-dbus
 	depends = python-gobject
+	depends = power-profiles-daemon
 	depends = sudo
 	depends = swh-plugins
 	depends = systemd
 	depends = t2fanrd
+	depends = util-linux
+	depends = vulkan-icd-loader
+	depends = vulkan-radeon
 	depends = wireplumber
+	depends = wl-clipboard
+	options = !lto
 	backup = etc/omarchy-t2.conf
-	source = omarchy-t2-0.1.0.tar.gz::https://github.com/aminmarashi/omarchy-t2/archive/refs/tags/v0.1.0.tar.gz
+	source = omarchy-t2::git+https://github.com/aminmarashi/omarchy-t2.git#commit=a8bc328f49866f32ce3f57637257afc84e280146
+	source = qwentts::git+https://github.com/ServeurpersoCom/qwentts.cpp.git#commit=a8a7716b530e49fed537c57711247c12fbbb903c
+	source = ggml::git+https://github.com/ServeurpersoCom/ggml.git#commit=c044c6f03892f9d5e98213b05f8afea1f8b0d3c9
 	source = t2-apple-audio-dsp-8d3edcbfcf17649279927fb12130b8575e912d2e.tar.gz::https://github.com/lemmyg/t2-apple-audio-dsp/archive/8d3edcbfcf17649279927fb12130b8575e912d2e.tar.gz
-	sha256sums = 92b1b269e8258efee84dc23390bccfed2fc9d69b49c9c7386473547c78274d0d
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
 	sha256sums = 24370f3c1a9bbebb18568a9247f992b6c630356e6b62178568aed25d9efd792c
 
 pkgname = omarchy-t2
