@@ -2,7 +2,7 @@ pkgbase = omarchy-t2
 	pkgdesc = Omarchy hardware support, React DRM Touch Bar setup, tuning, and Vulkan TTS for Intel T2 MacBook Pros
 	pkgver = 0.4.0
 	pkgrel = 1
-	url = https://github.com/aminmarashi/omarchy-t2
+	url = https://github.com/marashiai/omarchy-t2
 	install = omarchy-t2.install
 	arch = x86_64
 	license = MIT
@@ -49,7 +49,7 @@ pkgbase = omarchy-t2
 	depends = wl-clipboard
 	options = !lto
 	backup = etc/omarchy-t2.conf
-	source = omarchy-t2::git+https://github.com/aminmarashi/omarchy-t2.git#commit=0ada4cc33889f39c52dde090409b940ce3b9b45d
+	source = omarchy-t2::git+https://github.com/marashiai/omarchy-t2.git#commit=0ada4cc33889f39c52dde090409b940ce3b9b45d
 	source = qwentts::git+https://github.com/ServeurpersoCom/qwentts.cpp.git#commit=a8a7716b530e49fed537c57711247c12fbbb903c
 	source = ggml::git+https://github.com/ServeurpersoCom/ggml.git#commit=c044c6f03892f9d5e98213b05f8afea1f8b0d3c9
 	source = t2-apple-audio-dsp-8d3edcbfcf17649279927fb12130b8575e912d2e.tar.gz::https://github.com/lemmyg/t2-apple-audio-dsp/archive/8d3edcbfcf17649279927fb12130b8575e912d2e.tar.gz

@@ -5,7 +5,7 @@ pkgver=0.4.0
 pkgrel=1
 pkgdesc="Omarchy hardware support, React DRM Touch Bar setup, tuning, and Vulkan TTS for Intel T2 MacBook Pros"
 arch=('x86_64')
-url="https://github.com/aminmarashi/omarchy-t2"
+url="https://github.com/marashiai/omarchy-t2"
 license=('MIT')
 depends=(
   'apple-bcm-firmware'
