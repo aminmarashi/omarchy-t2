@@ -1,0 +1,130 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+
+readonly service=t2fanrd.service
+readonly marker=/run/omarchy-t2-fan-max
+declare -a fan_manual_files=()
+
+discover_fans() {
+  local candidate canonical
+  local -A seen=()
+
+  shopt -s nullglob globstar
+  fan_manual_files=()
+  for candidate in /sys/devices/**/APP0001:00/fan[0-9]_manual; do
+    canonical=$(readlink -f -- "$candidate")
+    [[ -n ${seen[$canonical]+present} ]] && continue
+    seen[$canonical]=1
+    fan_manual_files+=("$canonical")
+  done
+  ((${#fan_manual_files[@]} == 2)) || {
+    echo "Expected two controllable fans; found ${#fan_manual_files[@]}." >&2
+    return 1
+  }
+}
+
+max_active() {
+  [[ -e $marker ]] && ! systemctl is-active --quiet "$service"
+}
+
+show_fans() {
+  local manual stem input output maximum name
+
+  discover_fans
+  for manual in "${fan_manual_files[@]}"; do
+    stem=${manual%_manual}
+    input=${stem}_input
+    output=${stem}_output
+    maximum=${stem}_max
+    name=${stem##*/}
+    printf '%s: actual=%s RPM requested=%s RPM max=%s RPM\n' \
+      "$name" "$(< "$input")" "$(< "$output")" "$(< "$maximum")"
+  done
+}
+
+show_status() {
+  if max_active; then
+    echo 'Fan mode: max'
+  else
+    echo 'Fan mode: automatic'
+  fi
+  show_fans
+}
+
+set_max() {
+  local manual stem output maximum requested rollback=1
+
+  if max_active; then
+    echo 'Fans are already forced to maximum.'
+    show_fans
+    return
+  fi
+
+  discover_fans
+  for manual in "${fan_manual_files[@]}"; do
+    stem=${manual%_manual}
+    output=${stem}_output
+    maximum=${stem}_max
+    [[ -w $manual && -w $output && -r $maximum ]] || {
+      echo "Fan control is unavailable for ${stem##*/}." >&2
+      return 1
+    }
+    requested=$(< "$maximum")
+    [[ $requested =~ ^[0-9]+$ ]] || {
+      echo "Invalid maximum speed for ${stem##*/}: $requested" >&2
+      return 1
+    }
+  done
+
+  cleanup_failed_max() {
+    if ((rollback)); then
+      systemctl start "$service" || true
+      rm -f "$marker"
+    fi
+  }
+  trap cleanup_failed_max EXIT
+
+  systemctl stop "$service"
+  for manual in "${fan_manual_files[@]}"; do
+    stem=${manual%_manual}
+    output=${stem}_output
+    maximum=${stem}_max
+    printf '1\n' >"$manual"
+    printf '%s\n' "$(< "$maximum")" >"$output"
+  done
+  printf 'max\n' >"$marker"
+  rollback=0
+  trap - EXIT
+
+  echo 'Fans forced to maximum.'
+  show_fans
+}
+
+set_normal() {
+  systemctl start "$service"
+  systemctl is-active --quiet "$service"
+  rm -f "$marker"
+  echo 'Automatic t2fanrd control restored.'
+  show_fans
+}
+
+case ${1:-status} in
+status) show_status ;;
+max)
+  ((EUID == 0)) || { echo 'Fan control requires root.' >&2; exit 1; }
+  set_max
+  ;;
+normal)
+  ((EUID == 0)) || { echo 'Fan control requires root.' >&2; exit 1; }
+  set_normal
+  ;;
+toggle)
+  ((EUID == 0)) || { echo 'Fan control requires root.' >&2; exit 1; }
+  if max_active; then set_normal; else set_max; fi
+  ;;
+*)
+  echo 'Usage: fan-control [status|max|normal|toggle]' >&2
+  exit 2
+  ;;
+esac

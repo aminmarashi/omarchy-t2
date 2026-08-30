@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-VERSION=0.2.0
+VERSION=0.3.0
 SUPPORTED_MODEL=MacBookPro16,1
 
 ROOT=${OMARCHY_T2_ROOT:-}
@@ -10,6 +10,7 @@ SHARE_DIR=${OMARCHY_T2_SHARE_DIR:-$ROOT/usr/share/omarchy-t2}
 LIB_DIR=${OMARCHY_T2_LIB_DIR:-$ROOT/usr/lib/omarchy-t2}
 SYSTEM_CONFIG="$ROOT/etc/omarchy-t2.conf"
 SYSTEM_STATE="$ROOT/var/lib/omarchy-t2"
+POWER_SERVICE_STATE="$SYSTEM_STATE/power-optimizer.service.state"
 USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-t2"
 USER_CONFIG="$USER_CONFIG_DIR/config"
 USER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-t2"
@@ -35,7 +36,12 @@ Usage:
   omarchy-t2 status
   omarchy-t2 doctor
   omarchy-t2 battery [status | limit <50-100>]
-  omarchy-t2 fan [status | profile <cool|balanced|quiet>]
+  omarchy-t2 fan [status | profile <cool|balanced|quiet> | max | normal | toggle]
+  omarchy-t2 power [status | enable | disable]
+  omarchy-t2 power profiles <ac> <battery>
+  omarchy-t2 power thermal off
+  omarchy-t2 power thermal on <warm-c> <hot-c> <warm-idle> <hot-idle>
+  omarchy-t2 power <profile-switching|gpu-saving|wifi-saving|usb-autosuspend> <on|off>
   omarchy-t2 input [status | keyboard <layout> [variant] | tap <on|off>]
   omarchy-t2 audio [status | enable | disable | speakers <on|off> | mic <on|off>]
   omarchy-t2 bluetooth [status | enable | disable]
@@ -234,6 +240,21 @@ write_setting() {
 load_system_config() {
   BATTERY_LIMIT=95
   FAN_PROFILE=cool
+  POWER_ENABLED=true
+  POWER_PROFILE_SWITCHING=true
+  POWER_AC_PROFILE=performance
+  POWER_BATTERY_PROFILE=power-saver
+  POWER_GPU_SAVING=true
+  POWER_GPU_PROFILE=2
+  POWER_WIFI_SAVING=true
+  POWER_USB_AUTOSUSPEND=true
+  POWER_THERMAL_IDLE=true
+  POWER_WARM_C=45
+  POWER_HOT_C=65
+  POWER_WARM_RECOVERY_C=40
+  POWER_HOT_RECOVERY_C=60
+  POWER_WARM_IDLE_PERCENT=15
+  POWER_HOT_IDLE_PERCENT=50
   if [[ -r $SYSTEM_CONFIG ]]; then
     # shellcheck source=/dev/null
     source "$SYSTEM_CONFIG"
@@ -295,6 +316,127 @@ fan_profile() {
     sudo systemctl restart t2fanrd.service
   fi
   note "Fan profile: $profile"
+}
+
+power_restart() {
+  if runtime; then
+    sudo systemctl daemon-reload
+    sudo systemctl try-restart power-optimizer.service
+  fi
+}
+
+save_power_service_state() {
+  local state=disabled temporary
+
+  runtime || return 0
+  [[ ! -r $POWER_SERVICE_STATE ]] || return 0
+  systemctl is-enabled --quiet power-optimizer.service 2>/dev/null && state=enabled
+  temporary=$(mktemp)
+  printf '%s\n' "$state" >"$temporary"
+  run_root install -Dm0644 "$temporary" "$POWER_SERVICE_STATE"
+  rm -f "$temporary"
+}
+
+power_enable() {
+  save_power_service_state
+  replace_system_link \
+    "$ROOT/usr/lib/systemd/system/power-optimizer.service" \
+    "$ROOT/etc/systemd/system/power-optimizer.service"
+  write_setting "$SYSTEM_CONFIG" POWER_ENABLED true root
+  if runtime; then
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now power-optimizer.service
+  fi
+  note "Adaptive power policy enabled."
+}
+
+power_disable() {
+  write_setting "$SYSTEM_CONFIG" POWER_ENABLED false root
+  if runtime; then
+    sudo systemctl disable --now power-optimizer.service
+  fi
+  note "Adaptive power policy disabled."
+}
+
+power_boolean_value() {
+  case $1 in
+  on) echo true ;;
+  off) echo false ;;
+  *) die "value must be on or off" ;;
+  esac
+}
+
+power_boolean_setting() {
+  local key=$1 value
+  value=$(power_boolean_value "$2")
+  write_setting "$SYSTEM_CONFIG" "$key" "$value" root
+  power_restart
+}
+
+power_profiles() {
+  local profile
+  for profile in "$1" "$2"; do
+    case $profile in
+    performance|balanced|power-saver) ;;
+    *) die "power profiles must be performance, balanced, or power-saver" ;;
+    esac
+  done
+  write_setting "$SYSTEM_CONFIG" POWER_AC_PROFILE "$1" root
+  write_setting "$SYSTEM_CONFIG" POWER_BATTERY_PROFILE "$2" root
+  write_setting "$SYSTEM_CONFIG" POWER_PROFILE_SWITCHING true root
+  power_restart
+}
+
+power_thermal() {
+  local warm hot warm_idle hot_idle
+
+  case ${1:-} in
+  off)
+    [[ $# == 1 ]] || die "usage: omarchy-t2 power thermal off"
+    write_setting "$SYSTEM_CONFIG" POWER_THERMAL_IDLE false root
+    ;;
+  on)
+    [[ $# == 5 ]] || die "usage: omarchy-t2 power thermal on <warm-c> <hot-c> <warm-idle> <hot-idle>"
+    warm=$2
+    hot=$3
+    warm_idle=$4
+    hot_idle=$5
+    [[ $warm =~ ^[0-9]+$ && $hot =~ ^[0-9]+$ ]] || die "thermal temperatures must be whole degrees Celsius"
+    [[ $warm_idle =~ ^[0-9]+$ && $hot_idle =~ ^[0-9]+$ ]] || die "forced idle values must be percentages"
+    ((warm >= 35 && hot <= 95 && hot - warm >= 5)) || die "thermal range must be 35-95°C with hot at least 5°C above warm"
+    ((warm_idle <= hot_idle && hot_idle <= 50)) || die "forced idle must rise from warm to hot and cannot exceed 50%"
+    write_setting "$SYSTEM_CONFIG" POWER_THERMAL_IDLE true root
+    write_setting "$SYSTEM_CONFIG" POWER_WARM_C "$warm" root
+    write_setting "$SYSTEM_CONFIG" POWER_HOT_C "$hot" root
+    write_setting "$SYSTEM_CONFIG" POWER_WARM_RECOVERY_C "$((warm - 5))" root
+    write_setting "$SYSTEM_CONFIG" POWER_HOT_RECOVERY_C "$((hot - 5))" root
+    write_setting "$SYSTEM_CONFIG" POWER_WARM_IDLE_PERCENT "$warm_idle" root
+    write_setting "$SYSTEM_CONFIG" POWER_HOT_IDLE_PERCENT "$hot_idle" root
+    ;;
+  *) die "usage: omarchy-t2 power thermal <off | on <warm-c> <hot-c> <warm-idle> <hot-idle>>" ;;
+  esac
+  power_restart
+}
+
+power_status() {
+  local live_profile=unavailable live_source=unknown live_state=unknown service=inactive
+  load_system_config
+  if runtime; then
+    systemctl is-active --quiet power-optimizer.service && service=active
+    live_profile=$(powerprofilesctl get 2>/dev/null || echo unavailable)
+    [[ -r /run/power-optimizer/power_source ]] && live_source=$(< /run/power-optimizer/power_source)
+    [[ -r /run/power-optimizer/thermal_state ]] && live_state=$(< /run/power-optimizer/thermal_state)
+  fi
+  cat <<EOF
+enabled=$POWER_ENABLED
+service=$service
+profiles=$POWER_AC_PROFILE/$POWER_BATTERY_PROFILE automatic=$POWER_PROFILE_SWITCHING
+gpu-saving=$POWER_GPU_SAVING profile=$POWER_GPU_PROFILE
+wifi-saving=$POWER_WIFI_SAVING
+usb-autosuspend=$POWER_USB_AUTOSUSPEND
+thermal-idle=$POWER_THERMAL_IDLE range=${POWER_WARM_C}-${POWER_HOT_C}C idle=${POWER_WARM_IDLE_PERCENT}-${POWER_HOT_IDLE_PERCENT}% recovery=${POWER_WARM_RECOVERY_C}/${POWER_HOT_RECOVERY_C}C
+live=source:$live_source profile:$live_profile thermal:$live_state
+EOF
 }
 
 write_input_module() {
@@ -484,6 +626,7 @@ tts_remove() {
 }
 
 audio_speakers_enable() {
+  local local_bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
   local legacy="$ROOT/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf"
   local target="$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
   if [[ -e $legacy || -L $legacy ]]; then
@@ -491,11 +634,13 @@ audio_speakers_enable() {
     run_root rm -f "$legacy"
   fi
   replace_system_link "$SHARE_DIR/audio/10-omarchy-t2-speakers.conf" "$target"
+  replace_user_link "$LIB_DIR/audio-output-sink" "$local_bin/omarchy-audio-output-sink"
 }
 
 audio_speakers_disable() {
   restore_system_file "$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
   restore_system_file "$ROOT/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf"
+  restore_user_file "${XDG_BIN_HOME:-$HOME/.local/bin}/omarchy-audio-output-sink"
 }
 
 audio_mic_enable() {
@@ -538,7 +683,8 @@ audio_defaults() {
   runtime || return 0
   sleep 1
   pactl set-default-sink effect_input.filter-chain-speakers 2>/dev/null || true
-  pactl set-sink-volume effect_input.filter-chain-speakers 25% 2>/dev/null || true
+  pactl set-sink-volume effect_input.filter-chain-speakers 100% 2>/dev/null || true
+  pactl set-sink-volume alsa_output.pci-0000_04_00.3.HiFi__Speaker__sink 25% 2>/dev/null || true
   audio_mic_defaults
 }
 
@@ -606,7 +752,8 @@ cmd_setup() {
   cat <<EOF
 Omarchy T2 will configure $SUPPORTED_MODEL with:
   • internal touchpad classification and palm rejection
-  • 95% battery limit and cool fan profile
+  • 95% battery limit and linear cool fan profile
+  • adaptive AC/battery, Radeon, Wi-Fi, USB, and thermal power policy
   • Mac ISO keyboard layout with tap-to-click disabled
   • protected six-speaker DSP and normalized microphone DSP
   • Bluetooth passkey display and A2DP auto-connect
@@ -631,6 +778,11 @@ EOF
   setup_touchpad
   battery_limit "$BATTERY_LIMIT"
   fan_profile "$FAN_PROFILE"
+  if [[ $POWER_ENABLED == true ]]; then
+    power_enable
+  else
+    power_disable
+  fi
   input_apply
   audio_speakers_enable
   audio_mic_enable
@@ -652,6 +804,7 @@ cmd_status() {
 Model:          $(model_name)
 Battery limit:  $BATTERY_LIMIT% (hardware: $actual_battery)
 Fan profile:    $FAN_PROFILE
+Power policy:   $([[ $POWER_ENABLED == true ]] && echo enabled || echo disabled)
 Keyboard:       $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+/$KEYBOARD_VARIANT}
 Tap-to-click:   $TAP_TO_CLICK
 Text-to-speech: $([[ $TTS_ENABLED == true ]] && echo enabled || echo disabled) (models: $(tts_models_ready && echo ready || echo missing))
@@ -673,12 +826,16 @@ doctor_check() {
 
 cmd_doctor() {
   local failures=0
+  load_system_config
   load_input_config
   doctor_check "Supported model" test "$(model_name)" = "$SUPPORTED_MODEL" || failures=$((failures + 1))
   doctor_check "T2 kernel" grep -qi t2 /proc/sys/kernel/osrelease || failures=$((failures + 1))
   doctor_check "Touchpad rule" test -e "$ROOT/etc/udev/rules.d/99-omarchy-t2-touchpad.rules" || failures=$((failures + 1))
   doctor_check "Battery service" systemctl is-enabled omarchy-t2-battery-limit.service || failures=$((failures + 1))
   doctor_check "Fan service" systemctl is-active t2fanrd.service || failures=$((failures + 1))
+  if [[ $POWER_ENABLED == true ]]; then
+    doctor_check "Power optimizer" systemctl is-active power-optimizer.service || failures=$((failures + 1))
+  fi
   doctor_check "Speaker DSP config" test -e "$ROOT/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf" || failures=$((failures + 1))
   doctor_check "Microphone DSP config" test -e "${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" || failures=$((failures + 1))
   doctor_check "Speaker DSP node" pactl get-sink-info effect_input.filter-chain-speakers || failures=$((failures + 1))
@@ -707,6 +864,7 @@ remove_input_include() {
 
 cmd_restore() {
   local assume_yes=false
+  local power_service_state=disabled
   local tts_launcher="$ROOT/usr/bin/omarchy-tts"
   [[ ${1:-} == --yes || ${1:-} == -y ]] && assume_yes=true
   require_supported_model
@@ -715,7 +873,9 @@ cmd_restore() {
   user_systemctl disable --now omarchy-t2-mic-guard.service >/dev/null 2>&1 || true
   [[ -x $tts_launcher ]] && "$tts_launcher" stop >/dev/null 2>&1 || true
   if runtime; then
+    [[ -r $POWER_SERVICE_STATE ]] && power_service_state=$(< "$POWER_SERVICE_STATE")
     sudo systemctl disable --now omarchy-t2-battery-limit.service >/dev/null 2>&1 || true
+    sudo systemctl disable --now power-optimizer.service >/dev/null 2>&1 || true
   fi
 
   audio_speakers_disable
@@ -725,6 +885,13 @@ cmd_restore() {
   restore_system_file "$ROOT/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
   restore_system_file "$ROOT/etc/udev/rules.d/90-omarchy-t2-battery.rules"
   restore_system_file "$ROOT/etc/t2fand.conf"
+  restore_system_file "$ROOT/etc/systemd/system/power-optimizer.service"
+  if runtime; then
+    sudo systemctl daemon-reload
+    if [[ $power_service_state == enabled ]]; then
+      sudo systemctl enable --now power-optimizer.service
+    fi
+  fi
   restore_user_file "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/omarchy-t2.lua"
   if [[ -d $TTS_DATA_DIR ]]; then
     case $TTS_DATA_DIR in
@@ -750,9 +917,33 @@ cmd_battery() {
 cmd_fan() {
   require_supported_model
   case ${1:-status} in
-  status) load_system_config; echo "$FAN_PROFILE" ;;
+  status)
+    load_system_config
+    echo "profile=$FAN_PROFILE"
+    if runtime; then "$LIB_DIR/fan-control" status; fi
+    ;;
   profile) [[ $# == 2 ]] || die "usage: omarchy-t2 fan profile <cool|balanced|quiet>"; fan_profile "$2" ;;
-  *) die "usage: omarchy-t2 fan [status | profile <cool|balanced|quiet>]" ;;
+  max|normal|toggle)
+    [[ $# == 1 ]] || die "usage: omarchy-t2 fan ${1}"
+    run_root "$LIB_DIR/fan-control" "$1"
+    ;;
+  *) die "usage: omarchy-t2 fan [status | profile <cool|balanced|quiet> | max | normal | toggle]" ;;
+  esac
+}
+
+cmd_power() {
+  require_supported_model
+  case ${1:-status} in
+  status) (($# <= 1)) || die "usage: omarchy-t2 power status"; power_status ;;
+  enable) [[ $# == 1 ]] || die "usage: omarchy-t2 power enable"; power_enable ;;
+  disable) [[ $# == 1 ]] || die "usage: omarchy-t2 power disable"; power_disable ;;
+  profiles) [[ $# == 3 ]] || die "usage: omarchy-t2 power profiles <ac> <battery>"; power_profiles "$2" "$3" ;;
+  thermal) shift; power_thermal "$@" ;;
+  profile-switching) [[ $# == 2 ]] || die "usage: omarchy-t2 power profile-switching <on|off>"; power_boolean_setting POWER_PROFILE_SWITCHING "$2" ;;
+  gpu-saving) [[ $# == 2 ]] || die "usage: omarchy-t2 power gpu-saving <on|off>"; power_boolean_setting POWER_GPU_SAVING "$2" ;;
+  wifi-saving) [[ $# == 2 ]] || die "usage: omarchy-t2 power wifi-saving <on|off>"; power_boolean_setting POWER_WIFI_SAVING "$2" ;;
+  usb-autosuspend) [[ $# == 2 ]] || die "usage: omarchy-t2 power usb-autosuspend <on|off>"; power_boolean_setting POWER_USB_AUTOSUSPEND "$2" ;;
+  *) die "usage: omarchy-t2 power [status | enable | disable | profiles | thermal | profile-switching | gpu-saving | wifi-saving | usb-autosuspend]" ;;
   esac
 }
 
@@ -880,6 +1071,7 @@ status) cmd_status ;;
 doctor) cmd_doctor ;;
 battery) cmd_battery "$@" ;;
 fan) cmd_fan "$@" ;;
+power) cmd_power "$@" ;;
 input) cmd_input "$@" ;;
 audio) cmd_audio "$@" ;;
 bluetooth) cmd_bluetooth "$@" ;;

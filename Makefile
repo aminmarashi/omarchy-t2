@@ -20,12 +20,16 @@ install:
 	install -Dm755 bin/omarchy-t2 "$(DESTDIR)$(PREFIX)/bin/omarchy-t2"
 	install -Dm755 libexec/omarchy-tts "$(DESTDIR)$(PREFIX)/bin/omarchy-tts"
 	install -Dm755 libexec/omarchy-tts-queue.py "$(PACKAGE_LIB)/tts-queue"
+	install -Dm755 libexec/omarchy-t2-power-optimizer "$(PACKAGE_LIB)/power-optimizer"
+	install -Dm755 libexec/omarchy-t2-fan-control "$(PACKAGE_LIB)/fan-control"
+	install -Dm755 libexec/omarchy-t2-audio-output-sink "$(PACKAGE_LIB)/audio-output-sink"
 	install -Dm755 "$(QWEN_TTS_BINARY)" "$(PACKAGE_LIB)/qwen-tts"
 	install -Dm755 libexec/omarchy-t2-apply-battery-limit "$(PACKAGE_LIB)/apply-battery-limit"
 	install -Dm755 libexec/omarchy-t2-bluetooth-agent "$(PACKAGE_LIB)/bluetooth-agent"
 	install -Dm755 libexec/omarchy-t2-mic-guard "$(PACKAGE_LIB)/mic-guard"
 	install -Dm644 systemd/omarchy-t2-battery-limit.service "$(DESTDIR)$(PREFIX)/lib/systemd/system/omarchy-t2-battery-limit.service"
 	install -Dm644 systemd/omarchy-t2-mic-guard.service "$(DESTDIR)$(PREFIX)/lib/systemd/user/omarchy-t2-mic-guard.service"
+	install -Dm644 systemd/power-optimizer.service "$(DESTDIR)$(PREFIX)/lib/systemd/system/power-optimizer.service"
 	install -Dm644 rules/90-omarchy-t2-battery.rules "$(PACKAGE_SHARE)/rules/90-omarchy-t2-battery.rules"
 	install -Dm644 rules/99-omarchy-apple-t2-touchpad.rules "$(PACKAGE_SHARE)/rules/99-omarchy-apple-t2-touchpad.rules"
 	install -Dm644 config/omarchy-t2.conf "$(DESTDIR)$(SYSCONFDIR)/omarchy-t2.conf"
@@ -54,4 +58,6 @@ install:
 
 test:
 	python3 tests/test-tts-queue.py
+	bash tests/test-audio-output-sink.sh
+	bash tests/test-power-optimizer.sh
 	bash tests/test-cli.sh

@@ -1,0 +1,445 @@
+#!/usr/bin/bash
+
+set -u
+
+POWER_PROFILE_SWITCHING=true
+POWER_AC_PROFILE=performance
+POWER_BATTERY_PROFILE=power-saver
+POWER_GPU_SAVING=true
+POWER_GPU_PROFILE=2
+POWER_WIFI_SAVING=true
+POWER_USB_AUTOSUSPEND=true
+POWER_THERMAL_IDLE=true
+POWER_WARM_C=45
+POWER_HOT_C=65
+POWER_WARM_RECOVERY_C=40
+POWER_HOT_RECOVERY_C=60
+POWER_WARM_IDLE_PERCENT=15
+POWER_HOT_IDLE_PERCENT=50
+
+power_config=${OMARCHY_T2_POWER_CONFIG:-/etc/omarchy-t2.conf}
+if [[ -r $power_config ]]; then
+  # shellcheck source=/dev/null
+  source "$power_config"
+fi
+
+readonly ac_online_path=/sys/class/power_supply/ADP1/online
+readonly energy_preference_path=/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference
+readonly runtime_dir=/run/power-optimizer
+readonly warm_temperature=$((POWER_WARM_C * 1000))
+readonly hot_temperature=$((POWER_HOT_C * 1000))
+readonly warm_recovery_temperature=$((POWER_WARM_RECOVERY_C * 1000))
+readonly hot_recovery_temperature=$((POWER_HOT_RECOVERY_C * 1000))
+
+gpu_profile_control=
+powerclamp_control=
+thermal_state=normal
+power_source=unknown
+
+log() {
+  printf 'power-optimizer: %s\n' "$*"
+}
+
+validate_config() {
+  local boolean profile value
+
+  for boolean in POWER_PROFILE_SWITCHING POWER_GPU_SAVING POWER_WIFI_SAVING \
+    POWER_USB_AUTOSUSPEND POWER_THERMAL_IDLE; do
+    value=${!boolean}
+    [[ $value == true || $value == false ]] || {
+      log "$boolean must be true or false"
+      return 1
+    }
+  done
+  for profile in "$POWER_AC_PROFILE" "$POWER_BATTERY_PROFILE"; do
+    [[ $profile == performance || $profile == balanced || $profile == power-saver ]] || {
+      log "invalid power profile: $profile"
+      return 1
+    }
+  done
+  [[ $POWER_GPU_PROFILE =~ ^[0-9]+$ ]] || { log 'POWER_GPU_PROFILE must be numeric'; return 1; }
+  for value in "$POWER_WARM_C" "$POWER_HOT_C" "$POWER_WARM_RECOVERY_C" \
+    "$POWER_HOT_RECOVERY_C" "$POWER_WARM_IDLE_PERCENT" "$POWER_HOT_IDLE_PERCENT"; do
+    [[ $value =~ ^[0-9]+$ ]] || { log 'thermal settings must be numeric'; return 1; }
+  done
+  ((POWER_WARM_C >= 35 && POWER_HOT_C <= 95)) || { log 'thermal temperatures must stay between 35°C and 95°C'; return 1; }
+  ((POWER_WARM_C < POWER_HOT_C)) || { log 'warm temperature must be below hot temperature'; return 1; }
+  ((POWER_WARM_RECOVERY_C < POWER_WARM_C)) || { log 'warm recovery must be below warm temperature'; return 1; }
+  ((POWER_HOT_RECOVERY_C < POWER_HOT_C && POWER_HOT_RECOVERY_C >= POWER_WARM_C)) || {
+    log 'hot recovery must be between warm and hot temperatures'
+    return 1
+  }
+  ((POWER_WARM_IDLE_PERCENT <= POWER_HOT_IDLE_PERCENT && POWER_HOT_IDLE_PERCENT <= 50)) || {
+    log 'forced idle must rise from warm to hot and cannot exceed 50%'
+    return 1
+  }
+}
+
+write_control() {
+  local path=$1 requested=$2 current
+
+  [[ -w $path ]] || return 1
+  read -r current <"$path" || return 1
+  [[ $current == "$requested" ]] && return 0
+  printf '%s\n' "$requested" >"$path"
+}
+
+active_gpu_profile() {
+  local line
+
+  [[ -r $gpu_profile_control ]] || return 1
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]+[^:]*\*: ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done <"$gpu_profile_control"
+  return 1
+}
+
+write_gpu_profile() {
+  local requested=$1 current
+
+  [[ -w $gpu_profile_control ]] || return 1
+  current=$(active_gpu_profile) || current=
+  [[ $current == "$requested" ]] && return 0
+  printf '%s\n' "$requested" >"$gpu_profile_control"
+}
+
+ensure_gpu_profile() {
+  local card vendor original
+
+  [[ $POWER_GPU_SAVING == true ]] || return 0
+  if [[ -z $gpu_profile_control || ! -e $gpu_profile_control ]]; then
+    gpu_profile_control=
+    for card in /sys/class/drm/card*/device; do
+      [[ -r $card/vendor ]] || continue
+      read -r vendor <"$card/vendor"
+      if [[ $vendor == 0x1002 && -w $card/pp_power_profile_mode ]]; then
+        gpu_profile_control=$card/pp_power_profile_mode
+        break
+      fi
+    done
+  fi
+
+  [[ -n $gpu_profile_control ]] || return 0
+  if [[ ! -r $runtime_dir/original_gpu_profile ]]; then
+    original=$(active_gpu_profile) || return 0
+    printf '%s\n' "$original" >"$runtime_dir/original_gpu_profile"
+    log "Radeon profile discovered; original=$original"
+  fi
+  write_gpu_profile "$POWER_GPU_PROFILE" || true
+}
+
+find_powerclamp() {
+  local type_path
+
+  for type_path in /sys/class/thermal/cooling_device*/type; do
+    [[ -r $type_path ]] || continue
+    if [[ $(< "$type_path") == intel_powerclamp ]]; then
+      powerclamp_control=${type_path%/type}/cur_state
+      return
+    fi
+  done
+}
+
+save_powerclamp() {
+  local original
+
+  [[ -n $powerclamp_control && -r $powerclamp_control ]] || return
+  [[ -r $runtime_dir/original_powerclamp ]] && return
+  read -r original <"$powerclamp_control" || return
+  printf '%s\n' "$original" >"$runtime_dir/original_powerclamp"
+}
+
+restore_powerclamp() {
+  local original=0
+
+  if [[ -r $runtime_dir/original_powerclamp ]]; then
+    read -r original <"$runtime_dir/original_powerclamp" || original=0
+  fi
+  [[ -z $powerclamp_control ]] || write_control "$powerclamp_control" "$original" || true
+}
+
+power_saver_active() {
+  local preference
+
+  [[ -r $energy_preference_path ]] || return 1
+  read -r preference <"$energy_preference_path" || return 1
+  [[ $preference == power ]]
+}
+
+maximum_temperature() {
+  local file hwmon name temperature zone
+  local maximum=0 source=none
+
+  for hwmon in /sys/class/hwmon/hwmon*; do
+    [[ -r $hwmon/name ]] || continue
+    read -r name <"$hwmon/name"
+    case $name in
+    coretemp|amdgpu|applesmc) ;;
+    *) continue ;;
+    esac
+
+    for file in "$hwmon"/temp*_input; do
+      [[ -r $file ]] || continue
+      read -r temperature <"$file" || continue
+      if [[ $temperature =~ ^[0-9]+$ ]] &&
+        ((temperature >= 10000 && temperature <= 125000 && temperature > maximum)); then
+        maximum=$temperature
+        source=${file##*/}
+        source="$name/${source%_input}"
+      fi
+    done
+  done
+
+  for zone in /sys/class/thermal/thermal_zone*; do
+    [[ -r $zone/type && -r $zone/temp ]] || continue
+    read -r name <"$zone/type"
+    case $name in
+    x86_pkg_temp|pch_cannonlake) ;;
+    *) continue ;;
+    esac
+    read -r temperature <"$zone/temp" || continue
+    if [[ $temperature =~ ^[0-9]+$ ]] &&
+      ((temperature >= 10000 && temperature <= 125000 && temperature > maximum)); then
+      maximum=$temperature
+      source=$name
+    fi
+  done
+
+  printf '%s %s\n' "$maximum" "$source"
+}
+
+update_thermal_state() {
+  local temperature=$1 source=$2 next=$thermal_state
+
+  case $thermal_state in
+  normal)
+    if ((temperature >= hot_temperature)); then next=hot
+    elif ((temperature >= warm_temperature)); then next=warm
+    fi
+    ;;
+  warm)
+    if ((temperature >= hot_temperature)); then next=hot
+    elif ((temperature <= warm_recovery_temperature)); then next=normal
+    fi
+    ;;
+  hot)
+    if ((temperature <= warm_recovery_temperature)); then next=normal
+    elif ((temperature <= hot_recovery_temperature)); then next=warm
+    fi
+    ;;
+  esac
+
+  [[ $next == "$thermal_state" ]] && return
+  thermal_state=$next
+  printf '%s\n' "$thermal_state" >"$runtime_dir/thermal_state"
+  chmod 0644 "$runtime_dir/thermal_state"
+  log "thermal-state=$thermal_state temperature=$((temperature / 1000))C sensor=$source"
+}
+
+forced_idle_percent_for_temperature() {
+  local temperature=$1 temperature_span idle_span
+
+  if ((temperature <= warm_temperature)); then
+    printf '%s\n' "$POWER_WARM_IDLE_PERCENT"
+  elif ((temperature >= hot_temperature)); then
+    printf '%s\n' "$POWER_HOT_IDLE_PERCENT"
+  else
+    temperature_span=$((hot_temperature - warm_temperature))
+    idle_span=$((POWER_HOT_IDLE_PERCENT - POWER_WARM_IDLE_PERCENT))
+    printf '%s\n' "$((POWER_WARM_IDLE_PERCENT +
+      ((temperature - warm_temperature) * idle_span + temperature_span / 2) /
+      temperature_span))"
+  fi
+}
+
+apply_forced_idle() {
+  local temperature=$1 requested
+
+  if [[ $POWER_THERMAL_IDLE != true ]] || ! power_saver_active; then
+    restore_powerclamp
+    return
+  fi
+
+  case $thermal_state in
+  warm|hot) requested=$(forced_idle_percent_for_temperature "$temperature") ;;
+  *) requested=0 ;;
+  esac
+  [[ -z $powerclamp_control ]] || write_control "$powerclamp_control" "$requested" || true
+}
+
+wifi_interfaces() {
+  iw dev 2>/dev/null | awk '$1 == "Interface" { print $2 }'
+}
+
+save_wifi_original() {
+  local interface=$1 destination=$runtime_dir/wifi-$1 original
+
+  [[ -r $destination ]] && return
+  original=$(iw dev "$interface" get power_save 2>/dev/null | awk '{print $3}')
+  [[ $original == on || $original == off ]] || return
+  printf '%s\n' "$original" >"$destination"
+}
+
+set_wifi_power_save() {
+  local requested=$1 interface
+
+  while read -r interface; do
+    [[ -n $interface ]] || continue
+    save_wifi_original "$interface"
+    iw dev "$interface" set power_save "$requested" 2>/dev/null || true
+  done < <(wifi_interfaces)
+}
+
+restore_wifi() {
+  local saved interface original
+
+  for saved in "$runtime_dir"/wifi-*; do
+    [[ -r $saved ]] || continue
+    interface=${saved##*/wifi-}
+    read -r original <"$saved" || continue
+    iw dev "$interface" set power_save "$original" 2>/dev/null || true
+  done
+}
+
+eligible_usb_device() {
+  local device=$1 real_path device_class
+
+  [[ -r $device/idVendor && -r $device/idProduct && -w $device/power/control ]] || return 1
+  real_path=$(readlink -f "$device")
+  [[ $real_path != *'/t2bce_core/'* ]] || return 1
+  if [[ -r $device/bDeviceClass ]]; then
+    read -r device_class <"$device/bDeviceClass"
+    [[ $device_class != 09 ]] || return 1
+  fi
+}
+
+save_usb_original() {
+  local device=$1 name destination original
+
+  name=${device##*/}
+  destination=$runtime_dir/usb-$name
+  [[ -r $destination ]] && return
+  read -r original <"$device/power/control" || return
+  printf '%s\n' "$original" >"$destination"
+}
+
+set_external_usb_auto() {
+  local device
+
+  for device in /sys/bus/usb/devices/*; do
+    eligible_usb_device "$device" || continue
+    save_usb_original "$device"
+    write_control "$device/power/control" auto || true
+  done
+}
+
+restore_usb() {
+  local saved name device original
+
+  for saved in "$runtime_dir"/usb-*; do
+    [[ -r $saved ]] || continue
+    name=${saved##*/usb-}
+    device=/sys/bus/usb/devices/$name
+    [[ -w $device/power/control ]] || continue
+    read -r original <"$saved" || continue
+    write_control "$device/power/control" "$original" || true
+  done
+}
+
+read_power_source() {
+  local online
+
+  [[ -r $ac_online_path ]] || { echo unknown; return; }
+  read -r online <"$ac_online_path" || { echo unknown; return; }
+  if [[ $online == 1 ]]; then echo ac
+  elif [[ $online == 0 ]]; then echo battery
+  else echo unknown
+  fi
+}
+
+apply_power_source() {
+  local next=$1 profile
+
+  if [[ $POWER_PROFILE_SWITCHING == true ]]; then
+    if [[ $next == ac ]]; then profile=$POWER_AC_PROFILE
+    elif [[ $next == battery ]]; then profile=$POWER_BATTERY_PROFILE
+    else return
+    fi
+    powerprofilesctl set "$profile" || return 1
+  fi
+
+  case $next in
+  ac)
+    restore_wifi
+    restore_usb
+    ;;
+  battery)
+    [[ $POWER_WIFI_SAVING == true ]] && set_wifi_power_save on
+    [[ $POWER_USB_AUTOSUSPEND == true ]] && set_external_usb_auto
+    ;;
+  *) return ;;
+  esac
+  power_source=$next
+  printf '%s\n' "$power_source" >"$runtime_dir/power_source"
+  chmod 0644 "$runtime_dir/power_source"
+  log "power-source=$power_source profile=$(powerprofilesctl get 2>/dev/null || echo unavailable)"
+}
+
+restore_all() {
+  local original
+
+  restore_powerclamp
+  restore_wifi
+  restore_usb
+  if [[ -n $gpu_profile_control && -r $runtime_dir/original_gpu_profile ]]; then
+    read -r original <"$runtime_dir/original_gpu_profile" || original=
+    [[ -z $original ]] || write_gpu_profile "$original" || true
+  fi
+  if [[ -r $runtime_dir/original_power_profile ]]; then
+    read -r original <"$runtime_dir/original_power_profile" || original=
+    [[ -z $original ]] || powerprofilesctl set "$original" 2>/dev/null || true
+  fi
+  log 'stopped; original controls restored'
+}
+
+main() {
+  local next_source temperature source
+
+  validate_config || exit 1
+  mkdir -p "$runtime_dir"
+  powerprofilesctl get >"$runtime_dir/original_power_profile" 2>/dev/null || true
+  find_powerclamp
+  save_powerclamp
+  printf '%s\n' "$thermal_state" >"$runtime_dir/thermal_state"
+  chmod 0644 "$runtime_dir/thermal_state"
+
+  trap 'exit 0' INT TERM
+  trap restore_all EXIT
+
+  while true; do
+    ensure_gpu_profile
+    next_source=$(read_power_source)
+    [[ $next_source == "$power_source" ]] || apply_power_source "$next_source" || true
+
+    if [[ $next_source == battery ]]; then
+      [[ $POWER_WIFI_SAVING == true ]] && set_wifi_power_save on
+      [[ $POWER_USB_AUTOSUSPEND == true ]] && set_external_usb_auto
+    fi
+
+    read -r temperature source < <(maximum_temperature)
+    if ((temperature > 0)); then
+      update_thermal_state "$temperature" "$source"
+    else
+      thermal_state=normal
+    fi
+    apply_forced_idle "$temperature"
+    sleep 5
+  done
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

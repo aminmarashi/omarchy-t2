@@ -124,7 +124,7 @@ export OMARCHY_T2_TTS_CODEC_SHA256
 OMARCHY_T2_TTS_CODEC_SHA256=$(sha256sum "$test_dir/$TTS_CODEC" | awk '{print $1}')
 
 cli="$root/usr/bin/omarchy-t2"
-"$cli" version | grep -q '^omarchy-t2 0.2.0$'
+"$cli" version | grep -q '^omarchy-t2 0.3.0$'
 "$cli" setup --dry-run
 assert_file_contains "$root/etc/t2fand.conf" 'old fan config'
 assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
@@ -135,6 +135,10 @@ assert_exists "$root/etc/udev/rules.d/99-omarchy-t2-touchpad.rules"
 assert_file_contains "$root/usr/bin/omarchy-tts" 'qwen-talker-1.7b-customvoice-Q4_K_M.gguf'
 assert_file_contains "$root/usr/bin/omarchy-tts" 'kill -CONT "${job_pids[@]}"'
 assert_exists "$root/usr/lib/omarchy-t2/tts-queue"
+assert_exists "$root/usr/lib/omarchy-t2/power-optimizer"
+assert_exists "$root/usr/lib/omarchy-t2/fan-control"
+assert_exists "$root/usr/lib/omarchy-t2/audio-output-sink"
+assert_exists "$root/usr/lib/systemd/system/power-optimizer.service"
 assert_file_contains "$root/usr/bin/omarchy-tts" '--stream-by-line'
 assert_file_contains "$root/usr/bin/omarchy-tts" 'Preparing $total speech sections'
 assert_file_contains "$root/usr/bin/omarchy-tts" 'pw-play "$playback_audio"'
@@ -142,9 +146,25 @@ assert_file_contains "$root/usr/bin/omarchy-tts" '"Preparing speech…"'
 assert_not_exists "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules"
 assert_file_contains "$root/etc/omarchy-t2.conf" 'BATTERY_LIMIT=95'
 assert_file_contains "$root/etc/t2fand.conf" 'low_temp=40'
+assert_file_contains "$root/etc/t2fand.conf" 'high_temp=60'
+assert_file_contains "$root/etc/t2fand.conf" 'speed_curve=linear'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_ENABLED=true'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_WARM_C=45'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_HOT_C=65'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_WARM_IDLE_PERCENT=15'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_HOT_IDLE_PERCENT=50'
+assert_link_target \
+  "$root/etc/systemd/system/power-optimizer.service" \
+  "$root/usr/lib/systemd/system/power-optimizer.service"
 assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=n'
 assert_not_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
 assert_exists "$root/etc/pipewire/pipewire.conf.d/10-omarchy-t2-speakers.conf"
+assert_link_target \
+  "$home/.local/bin/omarchy-audio-output-sink" \
+  "$root/usr/lib/omarchy-t2/audio-output-sink"
+assert_file_contains "$root/usr/lib/omarchy-t2/audio-output-sink" 'node\.link-group'
+assert_file_contains "$cli" 'pactl set-sink-volume effect_input.filter-chain-speakers 100%'
+assert_file_contains "$cli" 'pactl set-sink-volume alsa_output.pci-0000_04_00.3.HiFi__Speaker__sink 25%'
 assert_file_contains "$home/.config/hypr/hyprland.lua" '-- omarchy-t2:start'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'kb_variant = "mac-iso"'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = false'
@@ -181,6 +201,19 @@ assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'if true then'
 
 "$cli" battery limit 80
 "$cli" fan profile quiet
+"$cli" power thermal on 50 70 20 45
+if "$cli" power thermal on 70 50 20 45 >/dev/null 2>&1; then
+  fail "invalid descending thermal range was accepted"
+fi
+"$cli" power profile-switching off
+"$cli" power profiles balanced power-saver
+"$cli" power gpu-saving off
+"$cli" power wifi-saving off
+"$cli" power usb-autosuspend off
+"$cli" power status | grep -q '^enabled=true$'
+"$cli" power disable
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_ENABLED=false'
+"$cli" power enable
 "$cli" input tap on
 "$cli" gpu status | grep -q '^dedicated$'
 "$cli" gpu dedicated
@@ -193,6 +226,15 @@ printf 'options apple-gmux force_igd=y\n' >"$root/etc/modprobe.d/apple-gmux.conf
 "$cli" gpu toggle
 [[ $(wc -l <"$OMARCHY_CALLS") == 3 ]] || fail "GPU helper delegates each requested change exactly once"
 assert_file_contains "$root/etc/omarchy-t2.conf" 'BATTERY_LIMIT=80'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_WARM_C=50'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_HOT_C=70'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_WARM_IDLE_PERCENT=20'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_HOT_IDLE_PERCENT=45'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_AC_PROFILE=balanced'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_PROFILE_SWITCHING=true'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_GPU_SAVING=false'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_WIFI_SAVING=false'
+assert_file_contains "$root/etc/omarchy-t2.conf" 'POWER_USB_AUTOSUSPEND=false'
 assert_file_contains "$root/etc/t2fand.conf" 'low_temp=55'
 assert_file_contains "$home/.config/hypr/omarchy-t2.lua" 'tap_to_click = true'
 assert_not_exists "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules"
@@ -203,11 +245,13 @@ install -d "$home/.config/uwsm/env-hyprland.d"
 printf 'canonical renderer policy\n' >"$home/.config/uwsm/env-hyprland.d/20-omarchy-t2-gpu"
 "$cli" restore --yes
 assert_file_contains "$root/etc/t2fand.conf" 'old fan config'
+assert_not_exists "$root/etc/systemd/system/power-optimizer.service"
 assert_file_contains "$root/etc/modprobe.d/apple-gmux.conf" 'force_igd=y'
 assert_file_contains "$root/etc/udev/rules.d/30-omarchy-t2-amdgpu-pm.rules" 'canonical Radeon policy'
 assert_file_contains "$home/.config/uwsm/env-hyprland.d/20-omarchy-t2-gpu" 'canonical renderer policy'
 assert_file_contains "$root/etc/udev/rules.d/99-omarchy-apple-t2-touchpad.rules" 'old touchpad rule'
 assert_file_contains "$root/etc/pipewire/pipewire.conf.d/10-t2_161_speakers.conf" 'old speaker config'
+assert_not_exists "$home/.local/bin/omarchy-audio-output-sink"
 assert_file_contains "$home/.config/pipewire/pipewire.conf.d/10-omarchy-t2-mic.conf" 'old mic config'
 assert_not_exists "$home/.config/hypr/omarchy-t2.lua"
 assert_not_exists "$home/.local/share/omarchy-t2/tts"
